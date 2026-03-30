@@ -37,6 +37,26 @@ def MaterializeVortexAddressSpaces
   }];
 }
 
+def MapParallelLoopsToVortexLaunch
+    : Pass<"vortex-map-parallel-loops-to-launch", "::mlir::func::FuncOp"> {
+  let summary = "Convert explicitly mapped scf.for nests into vortex.launch regions.";
+  let description = [{
+    Materializes Vortex execution regions from conservative, explicitly marked
+    loop nests. The pass only rewrites `scf.for` nests inside functions already
+    marked with `vortex.kernel`, and only when every mapped loop:
+
+      - carries `vortex.mapping = "core" | "subgroup" | "thread"`
+      - has lower bound `0`
+      - has step `1`
+      - has no iter_args / results
+      - forms a perfect nest
+
+    The resulting `vortex.launch` region replaces the mapped induction
+    variables with `vortex.core_id`, `vortex.subgroup_id`, and
+    `vortex.thread_id`.
+  }];
+}
+
 def SummarizePreVortex
     : Pass<"vortex-summarize-pre-vortex", "::mlir::func::FuncOp"> {
   let summary = "Attach a summary of the high-level IR seen before the Vortex dialect boundary.";
