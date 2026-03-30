@@ -1,0 +1,15 @@
+/build/
+/build-*/
+
+# Generated configuration files.
+/CMakeCache.txt
+/compile_commands.json
+/CTestTestfile.cmake
+/Testing/
+
+# Editor and Python cache noise.
+__pycache__/
+*.pyc
+*.swp
+*.swo
+.vscode/

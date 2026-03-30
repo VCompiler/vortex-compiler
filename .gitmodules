@@ -1,0 +1,4 @@
+[submodule "third_party/llvm"]
+	path = third_party/llvm
+	url = https://github.com/vortexgpgpu/llvm.git
+	branch = vortex_2.x
