@@ -3,6 +3,27 @@
 
 include "mlir/Pass/PassBase.td"
 
+def MarkVortexKernel
+    : Pass<"vortex-mark-kernel", "::mlir::func::FuncOp"> {
+  let summary = "Mark selected func.func operations as Vortex kernels.";
+  let description = [{
+    Adds the `vortex.kernel` unit attribute to functions that should become
+    Vortex kernel entry points. The first implementation is intentionally
+    conservative: it only marks functions selected by exact symbol name or by a
+    temporary `vortex.entry` marker attribute.
+  }];
+  let options = [
+    ListOption<"kernelNames", "kernel-name", "std::string",
+               "Exact function names to mark as Vortex kernels">,
+    Option<"recognizeEntryAttr", "recognize-entry-attr", "bool",
+           /*default=*/"true",
+           "Treat the temporary `vortex.entry` unit attribute as a kernel marker">,
+    Option<"removeEntryAttr", "remove-entry-attr", "bool",
+           /*default=*/"false",
+           "Remove the temporary `vortex.entry` marker after adding `vortex.kernel`">
+  ];
+}
+
 def SummarizePreVortex
     : Pass<"vortex-summarize-pre-vortex", "::mlir::func::FuncOp"> {
   let summary = "Attach a summary of the high-level IR seen before the Vortex dialect boundary.";
