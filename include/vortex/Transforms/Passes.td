@@ -24,6 +24,19 @@ def MarkVortexKernel
   ];
 }
 
+def MaterializeVortexAddressSpaces
+    : Pass<"vortex-materialize-address-spaces", "::mlir::func::FuncOp"> {
+  let summary = "Attach Vortex global address spaces to kernel memref arguments.";
+  let description = [{
+    Rewrites memref-typed kernel function arguments that still use the default
+    memory space so they explicitly carry `#vortex.address_space<global>`.
+
+    The first implementation only touches `func.func` arguments of functions
+    already marked with `vortex.kernel`. It does not yet rewrite call sites or
+    infer local/private allocations.
+  }];
+}
+
 def SummarizePreVortex
     : Pass<"vortex-summarize-pre-vortex", "::mlir::func::FuncOp"> {
   let summary = "Attach a summary of the high-level IR seen before the Vortex dialect boundary.";

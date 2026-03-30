@@ -1,5 +1,6 @@
 add_mlir_library(MLIRVortexTransforms
   MarkVortexKernelPass.cpp
+  MaterializeVortexAddressSpacesPass.cpp
   SummarizePreVortexPass.cpp
   ValidatePreVortexPass.cpp
 
