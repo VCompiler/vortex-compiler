@@ -57,6 +57,22 @@ def MapParallelLoopsToVortexLaunch
   }];
 }
 
+def PromoteTilesToVortexLocal
+    : Pass<"vortex-promote-tiles-to-local", "::mlir::func::FuncOp"> {
+  let summary = "Promote explicitly marked memref.subview tiles into vortex.local_alloc buffers.";
+  let description = [{
+    Rewrites conservatively marked `memref.subview` operations inside
+    `vortex.launch` regions into explicit local-memory buffers:
+
+      - `vortex.promote_to_local` marks the subview for promotion
+      - `vortex.write_back` requests a copy back to the original subview
+
+    The first implementation is intentionally narrow. It only handles static
+    shaped memref.subview results and does not yet expand the copies into
+    cooperative per-lane load/store sequences.
+  }];
+}
+
 def SummarizePreVortex
     : Pass<"vortex-summarize-pre-vortex", "::mlir::func::FuncOp"> {
   let summary = "Attach a summary of the high-level IR seen before the Vortex dialect boundary.";
