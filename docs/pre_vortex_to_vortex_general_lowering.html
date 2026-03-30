@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pre-Vortex 到 Vortex 的通用 Lowering 设计</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #131a2e;
+      --panel2: #1a2340;
+      --text: #e8edf8;
+      --muted: #9fb0d1;
+      --accent: #6fd3ff;
+      --accent2: #86efac;
+      --warn: #fbbf24;
+      --line: #2c3963;
+      --danger: #fca5a5;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: linear-gradient(180deg, #0a0f1d 0%, #10182f 100%);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .wrap {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+    }
+    h1, h2, h3 { margin-top: 0; }
+    h1 { font-size: 34px; margin-bottom: 10px; }
+    h2 {
+      font-size: 24px;
+      margin: 34px 0 14px;
+      padding-left: 12px;
+      border-left: 4px solid var(--accent);
+    }
+    h3 { font-size: 18px; margin: 24px 0 10px; color: var(--accent2); }
+    p, li { color: var(--text); }
+    .lead {
+      color: var(--muted);
+      font-size: 16px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: rgba(19, 26, 46, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px 20px;
+      box-shadow: 0 10px 25px rgba(0,0,0,.18);
+    }
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    @media (max-width: 980px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--accent);
+      margin: 4px 6px 0 0;
+      font-size: 13px;
+      background: rgba(111,211,255,.08);
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      align-items: stretch;
+    }
+    @media (max-width: 1100px) {
+      .flow { grid-template-columns: 1fr; }
+    }
+    .step {
+      position: relative;
+      background: var(--panel2);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      min-height: 180px;
+    }
+    .step .num {
+      display: inline-flex;
+      width: 28px;
+      height: 28px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #051120;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(19, 26, 46, 0.9);
+    }
+    th, td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+    th { color: var(--accent); background: rgba(111,211,255,.08); }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    pre {
+      background: #0d1428;
+      border: 1px solid var(--line);
+      padding: 14px;
+      border-radius: 12px;
+      overflow: auto;
+      color: #dfe8ff;
+    }
+    .warn { color: var(--warn); }
+    .muted { color: var(--muted); }
+    .danger { color: var(--danger); }
+    .footer {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Pre-Vortex 到 Vortex 的通用 Lowering 设计</h1>
+    <p class="lead">
+      这份页面强调的是“通用 lowering 规则”，而不是只针对某一个 <code>matmul</code> 样例做逐行替换。
+      核心目标是：只把执行、内存、同步这些真正的硬件语义 materialize 成 <code>vortex.*</code>。
+    </p>
+
+    <div class="card">
+      <span class="pill">func</span>
+      <span class="pill">arith</span>
+      <span class="pill">scf</span>
+      <span class="pill">memref</span>
+      <span class="pill">tensor</span>
+      <span class="pill">linalg</span>
+      <span class="pill">vector</span>
+      <span class="pill">vortex</span>
+      <p>
+        推荐目标不是“纯 Vortex IR”，而是 <strong>混合 IR</strong>：<br />
+        <code>func + arith + scf + memref + vector/linalg + vortex</code>
+      </p>
+    </div>
+
+    <h2>1. 通用 Lowering 总流程</h2>
+    <div class="flow">
+      <div class="step">
+        <div class="num">1</div>
+        <h3>规范化 Pre-Vortex</h3>
+        <ul>
+          <li>canonicalize / CSE</li>
+          <li>loop normalization</li>
+          <li>tiling / fusion</li>
+          <li>tensor → memref bufferization</li>
+        </ul>
+      </div>
+      <div class="step">
+        <div class="num">2</div>
+        <h3>Mapping Analysis</h3>
+        <ul>
+          <li>识别 kernel 入口</li>
+          <li>识别并行维 / reduction 维</li>
+          <li>决定 core / subgroup / thread 映射</li>
+          <li>选出 local promotion 候选</li>
+        </ul>
+      </div>
+      <div class="step">
+        <div class="num">3</div>
+        <h3>Materialize Vortex 语义</h3>
+        <ul>
+          <li><code>vortex.kernel</code></li>
+          <li><code>vortex.launch</code></li>
+          <li><code>core_id / subgroup_id / thread_id</code></li>
+          <li><code>local_alloc / barrier / fence</code></li>
+        </ul>
+      </div>
+      <div class="step">
+        <div class="num">4</div>
+        <h3>Vortex-aware Low Level IR</h3>
+        <ul>
+          <li>继续 lower 剩余 linalg/vector</li>
+          <li>保留标准 scf/memref/arith</li>
+          <li>为 LLVM lowering 做准备</li>
+        </ul>
+      </div>
+    </div>
+
+    <h2>2. 设计原则</h2>
+    <div class="grid grid-3">
+      <div class="card">
+        <h3>原则 A：只下沉硬件语义</h3>
+        <p>执行层级、地址空间、local memory、同步语义进入 Vortex；纯算法与普通控制流尽量保留标准 MLIR。</p>
+      </div>
+      <div class="card">
+        <h3>原则 B：不是所有 op 都替换</h3>
+        <p><code>arith</code>、大部分 <code>scf</code>、大部分 <code>memref</code>、大部分 <code>linalg</code> 都不应该机械重命名为 <code>vortex.*</code>。</p>
+      </div>
+      <div class="card">
+        <h3>原则 C：结果应更接近 LLVM</h3>
+        <p>如果换成 <code>vortex.*</code> 只是“改名”，但不能更稳定地进入 LLVM backend，就不应引入。</p>
+      </div>
+    </div>
+
+    <h2>3. 当前 Vortex Dialect 能力边界</h2>
+    <div class="grid grid-2">
+      <div class="card">
+        <h3>已能表达</h3>
+        <ul>
+          <li>kernel 边界：<code>vortex.kernel</code></li>
+          <li>执行区域：<code>vortex.launch</code></li>
+          <li>执行 id：<code>core_id / subgroup_id / thread_id</code></li>
+          <li>地址空间：<code>#vortex.address_space&lt;...&gt;</code></li>
+          <li>local memory：<code>vortex.local_alloc</code></li>
+          <li>同步：<code>vortex.barrier</code> / <code>vortex.fence</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>暂时缺失</h3>
+        <ul>
+          <li>完整 grid/block 级 launch 语义</li>
+          <li>全局 tile 网格 id</li>
+          <li>矩阵专用原语（如 <code>vortex.mma</code>）</li>
+          <li>显式 predication / mask</li>
+          <li>local bank/layout 细节</li>
+        </ul>
+        <p class="warn">所以当前更适合生成“混合 Vortex IR”，而不是试图把所有并行结构都强行吸收到当前 dialect。</p>
+      </div>
+    </div>
+
+    <h2>4. Op 类别决策表</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>类别</th>
+          <th>典型 op</th>
+          <th>通用 lowering 策略</th>
+          <th>是否直接进 Vortex</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>func</code></td>
+          <td><code>func.func</code>, <code>func.return</code></td>
+          <td>保留 <code>func.func</code>，对 kernel 加 <code>vortex.kernel</code>，参数补 global address space</td>
+          <td>部分进入</td>
+        </tr>
+        <tr>
+          <td><code>arith</code></td>
+          <td><code>constant</code>, <code>addi</code>, <code>mulf</code></td>
+          <td>继续保留标准 SSA 算术</td>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td><code>scf</code></td>
+          <td><code>for</code>, <code>if</code>, <code>while</code></td>
+          <td>算法循环保留；映射到执行层级的区域才重组为 <code>vortex.launch</code></td>
+          <td>选择性</td>
+        </tr>
+        <tr>
+          <td><code>memref</code></td>
+          <td><code>subview</code>, <code>load/store</code>, <code>alloc</code></td>
+          <td><code>subview</code> 多数保留；真正 promotion 到 local 时改成 <code>vortex.local_alloc</code></td>
+          <td>选择性</td>
+        </tr>
+        <tr>
+          <td><code>linalg</code></td>
+          <td><code>generic</code>, <code>fill</code>, <code>matmul</code></td>
+          <td>先 tile/bufferize/vectorize；当前不建议直接变成 <code>vortex.matmul</code></td>
+          <td>通常否</td>
+        </tr>
+        <tr>
+          <td><code>vector</code></td>
+          <td><code>transfer_*</code>, <code>contract</code></td>
+          <td>保留为中间层；未来有硬件原语再识别成专用 Vortex op</td>
+          <td>通常否</td>
+        </tr>
+        <tr>
+          <td><code>tensor</code></td>
+          <td><code>extract_slice</code>, <code>insert_slice</code></td>
+          <td>先 bufferization，再进入 Vortex lowering</td>
+          <td>否</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>5. 四种核心 Lowering 模式</h2>
+    <div class="grid grid-2">
+      <div class="card">
+        <h3>Kernel 边界 materialization</h3>
+        <pre>func.func @kernel(%a: memref&lt;...&gt;)
+↓
+func.func @kernel(
+  %a: memref&lt;..., #vortex.address_space&lt;global&gt;&gt;)
+  attributes {vortex.kernel}</pre>
+      </div>
+      <div class="card">
+        <h3>执行映射 materialization</h3>
+        <pre>... mapped tile region ...
+↓
+vortex.launch %cores, %subgroups, %threads {
+  %c = vortex.core_id : index
+  %s = vortex.subgroup_id : index
+  %t = vortex.thread_id : index
+}</pre>
+      </div>
+      <div class="card">
+        <h3>Local promotion</h3>
+        <pre>memref.subview(global tile)
+↓
+vortex.local_alloc() : memref&lt;..., #vortex.address_space&lt;local&gt;&gt;
+cooperative copy
+vortex.barrier &lt;core&gt;</pre>
+      </div>
+      <div class="card">
+        <h3>Structured compute 保留/下沉</h3>
+        <pre>linalg.matmul / linalg.generic
+↓
+可暂时保留在 launch 内
+或继续 lower 为
+scf + memref + arith</pre>
+      </div>
+    </div>
+
+    <h2>6. 不同 Kernel 类型的通用路线</h2>
+    <div class="grid grid-2">
+      <div class="card">
+        <h3>Tiled Matmul</h3>
+        <ul>
+          <li>outer tile loops 可继续保留 <code>scf.for</code></li>
+          <li>inner cooperative tile region → <code>vortex.launch</code></li>
+          <li>A/B/C tile promotion → <code>vortex.local_alloc</code></li>
+          <li>copy 后插 <code>vortex.barrier &lt;core&gt;</code></li>
+          <li>计算体可暂时保留 <code>linalg.matmul</code> 或继续 lower</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Elementwise / Map / Reduction</h3>
+        <ul>
+          <li>elementwise：按并行维映射到 <code>subgroup/thread</code></li>
+          <li>reduction：先保留结构，再决定 subgroup/core 规约策略</li>
+          <li>当前阶段不必先造 <code>vortex.reduce</code></li>
+          <li>优先用标准 <code>scf + arith + memref</code> 承载计算本体</li>
+        </ul>
+      </div>
+    </div>
+
+    <h2>7. 推荐 Pass Pipeline</h2>
+    <div class="flow">
+      <div class="step">
+        <div class="num">A</div>
+        <h3>Pre-Vortex Normalize</h3>
+        <ul>
+          <li>canonicalize / CSE</li>
+          <li>bufferization</li>
+          <li>tiling / fusion</li>
+        </ul>
+      </div>
+      <div class="step">
+        <div class="num">B</div>
+        <h3>Analysis</h3>
+        <ul>
+          <li>parallel/reduction 维识别</li>
+          <li>launch mapping</li>
+          <li>promotion candidate 识别</li>
+        </ul>
+      </div>
+      <div class="step">
+        <div class="num">C</div>
+        <h3>Materialize Vortex</h3>
+        <ul>
+          <li><code>vortex.kernel</code></li>
+          <li><code>vortex.launch</code></li>
+          <li><code>local_alloc</code></li>
+          <li><code>barrier/fence</code></li>
+        </ul>
+      </div>
+      <div class="step">
+        <div class="num">D</div>
+        <h3>Prepare LLVM</h3>
+        <ul>
+          <li>lower 剩余 linalg/vector</li>
+          <li>压低到 scf/memref/arith</li>
+          <li>进入 VortexToLLVM</li>
+        </ul>
+      </div>
+    </div>
+
+    <h2>8. 当前阶段最重要的现实判断</h2>
+    <div class="card">
+      <p>
+        <strong>不要把“某个样例 IR 里出现了什么 op”直接等同于“Vortex dialect 需要有一个同名替代 op”。</strong>
+      </p>
+      <p>
+        更通用的理解应该是：
+      </p>
+      <ul>
+        <li>标准 MLIR 继续描述算法和结构</li>
+        <li>Vortex 只负责表达已经确定的硬件边界</li>
+        <li>真正需要优先做的是 <span class="warn">语义型 lowering pass</span>，而不是算子重命名</li>
+      </ul>
+    </div>
+
+    <div class="footer">
+      建议配合阅读：<code>docs/PRE_VORTEX_TO_VORTEX_GENERAL_LOWERING.md</code>
+    </div>
+  </div>
+</body>
+</html>
