@@ -64,6 +64,8 @@ MVP 不要求：
 4. `vortex-materialize-address-spaces`
 5. `vortex-map-parallel-loops-to-launch`
 6. `vortex-promote-tiles-to-local`
+7. `vortex-insert-barriers`
+8. `vortex-lower-linalg-inside-kernel`
 
 也就是说，当前已经具备：
 
@@ -72,13 +74,13 @@ MVP 不要求：
 3. global address space materialization
 4. 显式执行区域 `vortex.launch`
 5. 显式 local tile `vortex.local_alloc`
+6. local tile 协作使用边界上的 `vortex.barrier <core>`
+7. kernel 内 buffer-semantics `linalg.* -> scf + memref + arith`
 
 当前还没有的是：
 
-1. barrier 插入
-2. kernel 内 `linalg` 下沉
-3. Vortex 到 LLVM 的专用转换
-4. 端到端 pipeline 注册
+1. Vortex 到 LLVM 的专用转换
+2. 端到端 pipeline 注册
 
 ---
 
@@ -208,8 +210,7 @@ MVP 说明：
 
 状态：
 
-1. MVP 必须实现
-2. 这是当前最缺的一步
+1. 已实现
 
 MVP 边界：
 
@@ -230,13 +231,13 @@ MVP 边界：
 
 状态：
 
-1. MVP 必须实现
+1. 已实现
 
 MVP 边界：
 
-1. 先只处理 kernel 内的 `linalg.fill`、`linalg.matmul`、常见 elementwise
-2. 优先 lower 成 loops
-3. 不要求单独保留一层复杂的 `vector` 专项 pass
+1. 当前按保守策略处理 kernel 内的 buffer-semantics `linalg.*`
+2. 当前 lower 成 `scf.for + memref.load/store + arith`
+3. tensor-semantics `linalg` 仍直接拒绝
 
 ### 11. `lower-affine-to-scf`
 
@@ -476,4 +477,3 @@ MVP 边界：
 作用：
 
 1. 一次性串起上面所有必要阶段
-

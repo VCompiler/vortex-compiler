@@ -73,6 +73,47 @@ def PromoteTilesToVortexLocal
   }];
 }
 
+def InsertVortexBarriers
+    : Pass<"vortex-insert-barriers", "::mlir::func::FuncOp"> {
+  let summary = "Insert conservative vortex.barrier <core> operations around promoted local tiles.";
+  let description = [{
+    Scans `vortex.launch` regions for the narrow local-tile promotion pattern
+    produced by `vortex-promote-tiles-to-local`:
+
+      - `memref.copy global -> local`
+      - local tile uses
+      - optional `memref.copy local -> global`
+
+    The first implementation stays conservative and only inserts
+    `vortex.barrier <core>` at two points:
+
+      - after copy-in, before the first local use
+      - after the last local use, before copy-out
+
+    Complex patterns are skipped instead of rewritten.
+  }];
+}
+
+def LowerLinalgInsideVortexKernel
+    : Pass<"vortex-lower-linalg-inside-kernel", "::mlir::func::FuncOp"> {
+  let summary = "Lower buffer-semantics linalg operations inside Vortex kernels to scf/memref/arithmetic.";
+  let description = [{
+    Rewrites remaining `linalg.*` operations inside functions already marked
+    with `vortex.kernel` into explicit loop nests and scalar memory accesses.
+
+    The first implementation stays conservative:
+
+      - only buffer-semantics linalg ops are accepted
+      - lowering uses standard `scf.for` / `memref.load` / `memref.store`
+      - tensor-semantics linalg ops are rejected
+
+    This pass is intended to run after Vortex execution mapping, local tile
+    promotion, and barrier insertion, so the Vortex-specific execution and
+    memory structure stays explicit while the compute body moves to a form that
+    is easier to lower further toward LLVM.
+  }];
+}
+
 def SummarizePreVortex
     : Pass<"vortex-summarize-pre-vortex", "::mlir::func::FuncOp"> {
   let summary = "Attach a summary of the high-level IR seen before the Vortex dialect boundary.";

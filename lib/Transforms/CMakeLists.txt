@@ -1,4 +1,6 @@
 add_mlir_library(MLIRVortexTransforms
+  InsertVortexBarriersPass.cpp
+  LowerLinalgInsideVortexKernelPass.cpp
   MapParallelLoopsToVortexLaunchPass.cpp
   MarkVortexKernelPass.cpp
   MaterializeVortexAddressSpacesPass.cpp
@@ -22,6 +24,7 @@ add_mlir_library(MLIRVortexTransforms
     MLIRFuncDialect
     MLIRIR
     MLIRLinalgDialect
+    MLIRLinalgTransforms
     MLIRMathDialect
     MLIRMemRefDialect
     MLIRPass
