@@ -6,10 +6,12 @@ add_mlir_library(MLIRVortexTransforms
   MapParallelLoopsToVortexLaunchPass.cpp
   MarkVortexKernelPass.cpp
   MaterializeVortexAddressSpacesPass.cpp
+  NormalizeONNXFrontendPass.cpp
   PlanVortexLocalMemoryLayoutPass.cpp
   PrepareVortexToLLVMPass.cpp
   PromoteTilesToVortexLocalPass.cpp
   SummarizePreVortexPass.cpp
+  TileMatmulForPreVortexPass.cpp
   ValidatePreVortexPass.cpp
 
   EXCLUDE_FROM_LIBMLIR

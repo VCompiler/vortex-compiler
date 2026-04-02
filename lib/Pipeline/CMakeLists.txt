@@ -8,6 +8,7 @@ add_mlir_library(MLIRVortexPipeline
 
   LINK_LIBS PUBLIC
     MLIRArithToLLVM
+    MLIRBufferizationTransforms
     MLIRControlFlowToLLVM
     MLIRFuncToLLVM
     MLIRFuncDialect

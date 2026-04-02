@@ -5,6 +5,8 @@
 
 namespace mlir::vortex {
 
+void buildONNXMatmulToPreVortexPipeline(OpPassManager &pm);
+void registerONNXMatmulToPreVortexPipeline();
 void buildPreVortexPipeline(OpPassManager &pm);
 void registerPreVortexPipeline();
 void buildMVPBackendPipeline(OpPassManager &pm);

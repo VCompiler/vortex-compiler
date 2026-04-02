@@ -3,6 +3,7 @@
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
@@ -10,6 +11,51 @@
 #include "vortex/Transforms/Passes.h"
 
 namespace mlir::vortex {
+
+namespace {
+
+struct ONNXMatmulToPreVortexPipelineOptions
+    : public PassPipelineOptions<ONNXMatmulToPreVortexPipelineOptions> {
+  Option<int64_t> tileSize{
+      *this, "tile-size",
+      llvm::cl::desc("Uniform static tile size for the frontend matmul tiling"),
+      llvm::cl::init(8)};
+};
+
+} // namespace
+
+static void buildONNXMatmulToPreVortexPipeline(
+    OpPassManager &pm, const ONNXMatmulToPreVortexPipelineOptions &options) {
+  bufferization::BufferResultsToOutParamsPassOptions outParamOptions;
+  outParamOptions.modifyPublicFunctions = true;
+  TileMatmulForPreVortexOptions tileOptions;
+  tileOptions.tileSize = options.tileSize;
+
+  pm.addPass(bufferization::createBufferResultsToOutParamsPass(
+      outParamOptions));
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+  pm.addPass(createNormalizeONNXFrontend());
+  pm.addNestedPass<func::FuncOp>(createTileMatmulForPreVortex(tileOptions));
+  buildPreVortexPipeline(pm);
+}
+
+void buildONNXMatmulToPreVortexPipeline(OpPassManager &pm) {
+  buildONNXMatmulToPreVortexPipeline(pm,
+                                     ONNXMatmulToPreVortexPipelineOptions{});
+}
+
+void registerONNXMatmulToPreVortexPipeline() {
+  PassPipelineRegistration<ONNXMatmulToPreVortexPipelineOptions> pipeline(
+      "vortex-onnx-matmul-to-pre-vortex-pipeline",
+      "Bridge the narrow ONNX-MLIR matmul frontend path into tiled "
+      "pre-Vortex IR.",
+      [](OpPassManager &pm,
+         const ONNXMatmulToPreVortexPipelineOptions &options) {
+        buildONNXMatmulToPreVortexPipeline(pm, options);
+      });
+  (void)pipeline;
+}
 
 void buildPreVortexPipeline(OpPassManager &pm) {
   pm.addPass(createCanonicalizerPass());
@@ -34,7 +80,7 @@ void buildMVPBackendPipeline(OpPassManager &pm) {
   pm.addPass(createLowerVortexRuntimeBuiltins());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
-  pm.addPass(createConvertSCFToCFPass());
+  pm.addPass(createSCFToControlFlowPass());
   pm.addPass(createArithToLLVMConversionPass());
   pm.addPass(createConvertIndexToLLVMPass());
   pm.addPass(createFinalizeMemRefToLLVMConversionPass());

@@ -226,6 +226,55 @@ def LowerVortexRuntimeBuiltins
   }];
 }
 
+def NormalizeONNXFrontend
+    : Pass<"vortex-normalize-onnx-frontend", "::mlir::ModuleOp"> {
+  let summary = "Normalize the narrow ONNX-MLIR frontend residue at the pre-Vortex boundary.";
+  let description = [{
+    Bridges the current ONNX-MLIR matmul path into the agreed pre-Vortex
+    contract without depending on the ONNX dialect being linked into `vx-opt`.
+
+    The first implementation intentionally stays narrow:
+
+      - convert top-level `"onnx.EntryPoint"` ops into temporary
+        `vortex.entry` markers on the referenced `func.func`
+      - erase the consumed `"onnx.EntryPoint"` ops
+      - strip module / function / block-argument / function-result attributes
+        whose names start with `onnx.` or `onnx-mlir.`
+
+    This pass only cleans frontend residue. It does not lower ONNX ops by
+    itself; the expectation is that ONNX-MLIR has already produced standard
+    `linalg` / `memref` IR before this pass runs.
+  }];
+}
+
+def TileMatmulForPreVortex
+    : Pass<"vortex-tile-matmul-for-pre-vortex", "::mlir::func::FuncOp"> {
+  let summary = "Tile the MVP frontend matmul pattern into the current pre-Vortex scf/subview form.";
+  let description = [{
+    Rewrites the first supported ONNX-MLIR bufferized matmul pattern into the
+    tiled shape that the existing pre-Vortex/Vortex pipeline already expects.
+
+    The first implementation intentionally handles only a very small subset:
+
+      - static-shape, rank-2, buffer-semantics `linalg.matmul`
+      - a matching preceding `linalg.fill`
+      - dimensions divisible by the chosen tile size
+      - optional frontend out-param wrapper pattern
+        `alloc + fill + matmul + memref.copy alloc -> output`
+
+    The rewritten IR keeps the compute in `linalg.matmul`, but materializes:
+
+      - outer `scf.for` tile loops
+      - `memref.subview` tile views for A/B/C
+      - tiled `linalg.fill`
+      - tiled inner `linalg.matmul`
+  }];
+  let options = [
+    Option<"tileSize", "tile-size", "int64_t", "8",
+           "Uniform static tile size for M/N/K tiling">
+  ];
+}
+
 def SummarizePreVortex
     : Pass<"vortex-summarize-pre-vortex", "::mlir::func::FuncOp"> {
   let summary = "Attach a summary of the high-level IR seen before the Vortex dialect boundary.";

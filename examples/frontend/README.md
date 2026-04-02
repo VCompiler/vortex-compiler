@@ -17,3 +17,15 @@
 2. 导出方式
 3. 产物位置
 4. 后续桥接边界
+
+当前已经补上的第二阶段最小能力是：
+
+1. `onnx-mlir` 产出 ONNX Dialect MLIR
+2. `onnx-mlir-opt` 产出 bufferized `linalg.matmul`
+3. `vx-opt` 通过前端桥接 pass 把它整理成 tiled `pre-vortex`
+
+对应脚本见：
+
+```text
+examples/frontend/mlir/lower_onnx_matmul_to_pre_vortex.sh
+```
