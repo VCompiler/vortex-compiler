@@ -7,8 +7,15 @@ add_mlir_library(MLIRVortexPipeline
     ${PROJECT_SOURCE_DIR}/include/vortex
 
   LINK_LIBS PUBLIC
+    MLIRArithToLLVM
+    MLIRControlFlowToLLVM
+    MLIRFuncToLLVM
     MLIRFuncDialect
+    MLIRIndexToLLVM
+    MLIRMemRefToLLVM
     MLIRPass
+    MLIRReconcileUnrealizedCasts
+    MLIRSCFToControlFlow
     MLIRTransforms
     MLIRVortexTransforms
 )

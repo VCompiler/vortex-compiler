@@ -6,6 +6,7 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -20,7 +21,7 @@ void registerVortexDialects(DialectRegistry &registry) {
   registry.insert<affine::AffineDialect, arith::ArithDialect,
                   bufferization::BufferizationDialect,
                   cf::ControlFlowDialect, func::FuncDialect,
-                  linalg::LinalgDialect, math::MathDialect,
+                  linalg::LinalgDialect, LLVM::LLVMDialect, math::MathDialect,
                   memref::MemRefDialect, scf::SCFDialect,
                   tensor::TensorDialect, vector::VectorDialect,
                   VortexDialect>();

@@ -7,6 +7,8 @@ namespace mlir::vortex {
 
 void buildPreVortexPipeline(OpPassManager &pm);
 void registerPreVortexPipeline();
+void buildMVPBackendPipeline(OpPassManager &pm);
+void registerMVPBackendPipeline();
 
 } // namespace mlir::vortex
 

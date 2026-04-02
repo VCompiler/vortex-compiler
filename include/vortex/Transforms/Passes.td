@@ -94,6 +94,56 @@ def InsertVortexBarriers
   }];
 }
 
+def PlanVortexLocalMemoryLayout
+    : Pass<"vortex-plan-local-memory-layout", "::mlir::func::FuncOp"> {
+  let summary = "Assign byte offsets and frame size attributes to vortex.local_alloc buffers.";
+  let description = [{
+    Computes a conservative per-kernel local-memory frame layout for
+    `vortex.local_alloc` operations and materializes the result in attributes:
+
+      - `vortex.local_frame_bytes` on the enclosing `func.func`
+      - `vortex.local.byte_offset` on each `vortex.local_alloc`
+      - `vortex.local.byte_size` on each `vortex.local_alloc`
+      - `vortex.local.alignment` on each `vortex.local_alloc`
+
+    The first implementation stays intentionally narrow:
+
+      - only functions already marked with `vortex.kernel` are processed
+      - only static-shaped, compact-layout local buffers are accepted
+      - local memrefs must not escape through `call`, `yield`, `branch`, or
+        `iter_args`
+
+    This pass only plans layout metadata. It does not yet lower local-memory
+    accesses to explicit addresses or LLVM dialect operations.
+  }];
+}
+
+def LowerVortexLocalMemory
+    : Pass<"vortex-lower-local-memory", "::mlir::ModuleOp"> {
+  let summary = "Lower the MVP subset of Vortex local memory to explicit LLVM pointer accesses.";
+  let description = [{
+    Lowers `vortex.local_alloc` and the first supported batch of local-memory
+    users into explicit byte-addressed accesses based on a `vx_local_mem_base`
+    wrapper:
+
+      - expand `memref.copy global <-> local` into `scf.for` loop nests
+      - lower local `memref.load` / `memref.store` into
+        `llvm.inttoptr + llvm.load/store`
+      - lower local `memref.subview` by composing indices back to the root
+        `vortex.local_alloc`
+      - erase now-dead `vortex.local_alloc` / `memref.cast` / `memref.subview`
+
+    The first implementation intentionally stays narrow:
+
+      - requires `vortex-plan-local-memory-layout` metadata
+      - only accepts local buffers rooted at `vortex.local_alloc`
+      - only allows `memref.cast`, `memref.subview`, `memref.copy`,
+        `memref.load`, and `memref.store` on local buffers
+      - still explicitly rejects more complex local aliasing forms such as
+        `memref.transpose` / `reinterpret_cast` / shape-changing views
+  }];
+}
+
 def LowerLinalgInsideVortexKernel
     : Pass<"vortex-lower-linalg-inside-kernel", "::mlir::func::FuncOp"> {
   let summary = "Lower buffer-semantics linalg operations inside Vortex kernels to scf/memref/arithmetic.";
@@ -111,6 +161,68 @@ def LowerLinalgInsideVortexKernel
     promotion, and barrier insertion, so the Vortex-specific execution and
     memory structure stays explicit while the compute body moves to a form that
     is easier to lower further toward LLVM.
+  }];
+}
+
+def LegalizeVortexForLLVM
+    : Pass<"vortex-legalize-for-llvm", "::mlir::ModuleOp"> {
+  let summary = "Legalize Vortex kernel IR at the LLVM lowering boundary.";
+  let description = [{
+    Performs the first, still-conservative cleanup step before lowering the
+    remaining `vortex.*` operations into LLVM dialect.
+
+    The initial implementation intentionally keeps the scope narrow:
+
+      - run standard `lower-affine` on all `func.func`
+      - inline `vortex.launch` bodies inside functions marked with
+        `vortex.kernel`
+      - rewrite `#vortex.address_space<global/private>` into numeric memory
+        spaces that the standard LLVM type converter can accept
+      - reject residual `vortex.local_alloc` or any remaining
+        `#vortex.address_space<local>` memref types, which must have been
+        removed by `vortex-lower-local-memory`
+      - reject residual `vortex.launch` / `vortex.yield` outside kernels or
+        after failed inlining
+
+    This pass runs on `builtin.module`, not `func.func`, so function signatures,
+    call sites, and nested memref types can stay consistent when memory-space
+    annotations are rewritten.
+  }];
+}
+
+def LowerVortexRuntimeBuiltins
+    : Pass<"vortex-lower-runtime-builtins", "::mlir::ModuleOp"> {
+  let summary = "Lower the MVP subset of Vortex runtime-facing builtins into wrapper calls.";
+  let description = [{
+    Converts the first batch of Vortex execution queries and synchronization
+    operations into plain `func.call` wrappers that the downstream LLVM/Vortex
+    toolchain already understands.
+
+    The initial implementation intentionally handles only the stable subset:
+
+      - `vortex.core_id      -> call @vx_core_id()`
+      - `vortex.subgroup_id  -> call @vx_warp_id()`
+      - `vortex.thread_id    -> call @vx_thread_id()`
+      - `vortex.barrier<core> -> call @vx_barrier(0, vx_num_warps())`
+
+    The integer wrapper results are cast back to `index` so the surrounding IR
+    can keep using normal MLIR index arithmetic before the later
+    `convert-index-to-llvm` step.
+
+    After the Vortex runtime-facing builtins are lowered, the pass also
+    retags `vortex.kernel` as a plain marker attribute (`vortex.kernel_entry`)
+    so later `llvm.func` conversion no longer trips the dialect verifier while
+    still preserving the notion of kernel entry points.
+
+    This pass currently rejects:
+
+      - residual `vortex.launch` / `vortex.yield` (run `vortex-legalize-for-llvm` first)
+      - `vortex.local_alloc`
+      - `vortex.fence`
+      - `vortex.barrier<subgroup>`
+
+    The unsupported pieces are deferred to the later local-memory and
+    target-specific lowering work.
   }];
 }
 

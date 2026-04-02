@@ -107,8 +107,8 @@ pre-vortex -> func + arith + scf + memref + linalg/vector + vortex
 
 ### 第五阶段：LLVM 接口准备
 
-9. `PrepareVortexToLLVMPass`
-10. `ConvertVortexToLLVMPass`
+9. `LegalizeVortexForLLVMPass`
+10. `LowerVortexRuntimeBuiltinsPass`
 
 ---
 
@@ -450,7 +450,7 @@ vortex-promote-tiles-to-local
 ### 优先级 P3
 
 6. `LowerLinalgInsideVortexPass`
-7. `PrepareVortexToLLVMPass`
+7. `LegalizeVortexForLLVMPass`
 
 ---
 

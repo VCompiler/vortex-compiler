@@ -129,11 +129,11 @@ Vortex 完全可以照这个模式做：
 
 这一步要么：
 
-1. 在 `PrepareVortexToLLVM` 里先改成标准 `memref.alloca` / `memref.alloc`
+1. 在 `LegalizeVortexForLLVM` 里先改成标准 `memref.alloca` / `memref.alloc`
 
 要么：
 
-1. 在 `ConvertVortexToLLVM` 里直接把它变成 LLVM descriptor
+1. 在 `LowerVortexRuntimeBuiltins` 里直接把它变成 LLVM descriptor
 
 ---
 
@@ -208,7 +208,7 @@ Vortex 完全可以照这个模式做：
 MVP 更合理的策略是：
 
 1. 先不在 pipeline 中生成 `vortex.fence`
-2. 或在 `ConvertVortexToLLVM` 中直接拒绝
+2. 或在 `LowerVortexRuntimeBuiltins` 中直接拒绝
 3. 等确认后端和硬件语义后再放开
 
 ---
@@ -261,12 +261,12 @@ MVP 更合理的策略是：
 
 必须自己补的至少有：
 
-1. `PrepareVortexToLLVMPass`
-2. `ConvertVortexToLLVMPass`
+1. `LegalizeVortexForLLVMPass`
+2. `LowerVortexRuntimeBuiltinsPass`
 
 其中：
 
-#### `PrepareVortexToLLVMPass`
+#### `LegalizeVortexForLLVMPass`
 
 建议负责：
 
@@ -275,7 +275,7 @@ MVP 更合理的策略是：
 3. 明确 `vortex.local_alloc` 的 lowering 路线
 4. 把 `#vortex.address_space<...>` 变成后续 `LLVMTypeConverter` 能接受的形式
 
-#### `ConvertVortexToLLVMPass`
+#### `LowerVortexRuntimeBuiltinsPass`
 
 建议负责：
 
@@ -291,7 +291,7 @@ MVP 更合理的策略是：
 MVP 建议：
 
 1. 先不开放 `vortex.fence` 的自动生成
-2. `ConvertVortexToLLVMPass` 遇到它直接报错
+2. `LowerVortexRuntimeBuiltinsPass` 遇到它直接报错
 
 原因：
 
@@ -306,10 +306,10 @@ MVP 建议：
 建议按这个顺序做：
 
 1. 先加一个小的 pipeline 文档或注册函数，明确 LLVM lowering 顺序
-2. 实现 `PrepareVortexToLLVMPass`
+2. 实现 `LegalizeVortexForLLVMPass`
    1. 先只做 `lower-affine`
    2. 再决定 `vortex.launch` 的 inline/擦除方式
-3. 实现 `ConvertVortexToLLVMPass`
+3. 实现 `LowerVortexRuntimeBuiltinsPass`
    1. 先做 `core_id / subgroup_id / thread_id`
    2. 再做 `barrier <core>`
    3. 最后做 `local_alloc`

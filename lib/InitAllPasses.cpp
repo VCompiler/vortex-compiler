@@ -8,6 +8,7 @@ namespace mlir::vortex {
 void registerVortexPassesAndPipelines() {
   registerVortexPasses();
   registerPreVortexPipeline();
+  registerMVPBackendPipeline();
 }
 
 } // namespace mlir::vortex

@@ -17,6 +17,7 @@ add_mlir_library(MLIRVortexInit
     MLIRBufferizationDialect
     MLIRControlFlowDialect
     MLIRFuncDialect
+    MLIRLLVMDialect
     MLIRLinalgDialect
     MLIRMathDialect
     MLIRMemRefDialect

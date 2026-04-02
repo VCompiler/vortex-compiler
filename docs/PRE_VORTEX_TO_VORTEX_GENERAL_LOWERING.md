@@ -745,7 +745,7 @@ func + arith + scf + memref + linalg + vortex
 ### 第三阶段
 
 1. `LowerLinalgInsideVortexPass`
-2. `PrepareVortexToLLVMPass`
+2. `LegalizeVortexForLLVMPass`
 3. `VortexToLLVMConversionPass`
 
 ---

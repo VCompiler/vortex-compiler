@@ -65,7 +65,9 @@ MVP 不要求：
 5. `vortex-map-parallel-loops-to-launch`
 6. `vortex-promote-tiles-to-local`
 7. `vortex-insert-barriers`
-8. `vortex-lower-linalg-inside-kernel`
+8. `vortex-plan-local-memory-layout`
+9. `vortex-lower-linalg-inside-kernel`
+10. `vortex-lower-local-memory`
 
 也就是说，当前已经具备：
 
@@ -75,12 +77,19 @@ MVP 不要求：
 4. 显式执行区域 `vortex.launch`
 5. 显式 local tile `vortex.local_alloc`
 6. local tile 协作使用边界上的 `vortex.barrier <core>`
-7. kernel 内 buffer-semantics `linalg.* -> scf + memref + arith`
+7. 每个 kernel 的 local frame 大小与 `local_alloc` 字节偏移规划
+8. kernel 内 buffer-semantics `linalg.* -> scf + memref + arith`
+9. local `memref.load/store/copy` 到显式地址化 LLVM 访问的 MVP lowering
 
 当前还没有的是：
 
-1. Vortex 到 LLVM 的专用转换
-2. 端到端 pipeline 注册
+1. 更完整的端到端 pipeline 注册
+2. 从 LLVM dialect 到最终 LLVM IR / backend 的一键集成流程
+
+当前已经补上的 pipeline：
+
+1. `vortex-mvp-backend-pipeline`
+2. 可把 post-local-memory 的混合 Vortex IR 继续降到 LLVM dialect
 
 ---
 
@@ -220,9 +229,33 @@ MVP 边界：
 
 ---
 
+### 10. `vortex-plan-local-memory-layout`
+
+作用：
+
+1. 为 kernel 内所有 `vortex.local_alloc` 规划 local frame
+2. 计算每个 alloc 的 `byte_offset / byte_size / alignment`
+3. 给函数附加 `vortex.local_frame_bytes`
+
+状态：
+
+1. MVP 基础版已实现
+2. 当前已覆盖：
+   静态 shape、紧凑布局、no-escape 的 `vortex.local_alloc`
+3. 当前仍未覆盖：
+   动态 shape、复杂 local alias、真正的 local address lowering
+
+MVP 边界：
+
+1. 先只接受 `#vortex.address_space<local>` 的静态 shaped memref
+2. 禁止 local memref 通过 `call / yield / branch / iter_args` 逃逸
+3. 这一 pass 只做布局属性规划，不做真实 lowering
+
+---
+
 ## 4.5 计算体下沉阶段
 
-### 10. `vortex-lower-linalg-inside-kernel`
+### 11. `vortex-lower-linalg-inside-kernel`
 
 作用：
 
@@ -239,7 +272,32 @@ MVP 边界：
 2. 当前 lower 成 `scf.for + memref.load/store + arith`
 3. tensor-semantics `linalg` 仍直接拒绝
 
-### 11. `lower-affine-to-scf`
+### 12. `vortex-lower-local-memory`
+
+作用：
+
+1. 把 local `memref.copy` 展开成显式 loop nest
+2. 把 local `memref.load/store` lower 成 `llvm.inttoptr + llvm.load/store`
+3. 擦除已无用的 `vortex.local_alloc / memref.cast`
+4. 对 local `memref.subview` 做索引回推并映射回 root `vortex.local_alloc`
+
+状态：
+
+1. MVP 基础版已实现
+2. 当前已覆盖：
+   `memref.cast`、`memref.subview`、`memref.copy`、`memref.load`、`memref.store`
+3. 当前仍未覆盖：
+   `memref.reinterpret_cast / expand_shape / collapse_shape / transpose / view`
+   等更复杂 local alias、`vx_local_mem_base` 的真实 runtime 实现
+
+MVP 边界：
+
+1. 要求先跑 `vortex-plan-local-memory-layout`
+2. 要求 local use 最终收敛到 `cast/subview/copy/load/store`
+3. 当前 `memref.subview` 仅按“地址变换”处理，不生成新的 local 对象
+4. 更复杂 local alias 仍显式拒绝
+
+### 13. `lower-affine-to-scf`
 
 作用：
 
@@ -250,7 +308,7 @@ MVP 边界：
 1. 视输入而定
 2. 如果 pre-vortex 已经不使用 `affine`，这步可以省
 
-### 12. `canonicalize`
+### 14. `canonicalize`
 
 作用：
 
@@ -260,7 +318,7 @@ MVP 边界：
 
 1. 标准 pass
 
-### 13. `cse`
+### 15. `cse`
 
 作用：
 
@@ -274,7 +332,7 @@ MVP 边界：
 
 ## 4.6 Vortex 到 LLVM 的接口准备阶段
 
-### 14. `vortex-prepare-to-llvm`
+### 16. `vortex-legalize-for-llvm`
 
 作用：
 
@@ -285,17 +343,23 @@ MVP 边界：
 
 状态：
 
-1. MVP 必须实现
+1. MVP 基础版已实现
+2. 当前已覆盖：
+   `lower-affine`、`vortex.launch` 内联、`global/private` 地址空间整数化、
+   residual local / residual launch 合法性检查
+3. 当前仍未覆盖：
+   `vortex.fence`、Vortex intrinsic 真正转 LLVM、剩余 local wrapper ABI 收口
 
 这一 pass 至少应处理：
 
-1. `#vortex.address_space<global/local/private>` 到 LLVM address space 的固定映射
-2. `vortex.local_alloc` 的后端对象表示约定
-3. `vortex.core_id / subgroup_id / thread_id` 的 lowering 入口约定
-4. `vortex.barrier` 的 intrinsic / builtin / runtime stub 约定
-5. `vortex.launch` 的结构性消解方式
+1. 先跑标准 `lower-affine`
+2. 把 `vortex.launch` 的 region inline 到外层 block，并擦掉 launch 外壳
+3. 把 `#vortex.address_space<global/private>` 改成整数 memory space
+4. 若还残留 `vortex.local_alloc` 或 `#vortex.address_space<local>`，直接报错，
+   要求先跑 `vortex-lower-local-memory`
+5. 给后续 `vortex-lower-runtime-builtins` 留下更稳定的 Vortex op 边界
 
-### 15. `vortex-convert-to-llvm`
+### 17. `vortex-lower-runtime-builtins`
 
 作用：
 
@@ -303,17 +367,24 @@ MVP 边界：
 
 状态：
 
-1. MVP 必须实现
+1. MVP 第一阶段已实现
+2. 当前已覆盖：
+   `core_id / subgroup_id / thread_id / barrier<core> -> vx_* wrapper call`
+3. 当前还会做：
+   把 `vortex.kernel` 改写成普通 marker `vortex.kernel_entry`，
+   避免后续 `llvm.func` 触发 Vortex dialect verifier
+4. 当前仍未覆盖：
+   `fence`、`barrier<subgroup>`、可能残留的 target-specific local ABI 收口
 
 最少需要覆盖：
 
 1. `vortex.core_id`
 2. `vortex.subgroup_id`
 3. `vortex.thread_id`
-4. `vortex.local_alloc`
-5. `vortex.barrier`
-6. `vortex.launch`
-7. `#vortex.address_space<...>`
+4. `vortex.barrier`
+5. `vortex.launch`
+6. `#vortex.address_space<...>`
+7. 后续保留下来的 Vortex target wrapper / intrinsic
 
 ---
 
@@ -321,37 +392,37 @@ MVP 边界：
 
 下面这些 pass 原则上直接复用标准 MLIR conversion：
 
-### 16. `convert-scf-to-cf`
+### 18. `convert-scf-to-cf`
 
 作用：
 
 1. 把结构化控制流变成 CFG
 
-### 17. `convert-arith-to-llvm`
+### 19. `convert-arith-to-llvm`
 
 作用：
 
 1. 把通用标量算术转成 LLVM dialect
 
-### 18. `finalize-memref-to-llvm`
+### 20. `finalize-memref-to-llvm`
 
 作用：
 
 1. 完成 memref descriptor 到 LLVM dialect 的 lowering
 
-### 19. `convert-func-to-llvm`
+### 21. `convert-func-to-llvm`
 
 作用：
 
 1. 把 `func.func/call/return` 变成 LLVM dialect
 
-### 20. `convert-cf-to-llvm`
+### 22. `convert-cf-to-llvm`
 
 作用：
 
 1. 把 `cf.*` 转成 LLVM dialect
 
-### 21. `reconcile-unrealized-casts`
+### 23. `reconcile-unrealized-casts`
 
 作用：
 
@@ -361,13 +432,13 @@ MVP 边界：
 
 ## 4.8 LLVM IR 与后端阶段
 
-### 22. `mlir-to-llvmir`
+### 24. `mlir-to-llvmir`
 
 作用：
 
 1. 从 LLVM dialect 导出 LLVM IR
 
-### 23. LLVM backend codegen
+### 25. LLVM backend codegen
 
 作用：
 
@@ -414,19 +485,21 @@ MVP 边界：
 7. `vortex-map-parallel-loops-to-launch`
 8. `vortex-promote-tiles-to-local`
 9. `vortex-insert-barriers`
-10. `vortex-lower-linalg-inside-kernel`
-11. `canonicalize`
-12. `cse`
-13. `vortex-prepare-to-llvm`
-14. `vortex-convert-to-llvm`
-15. `convert-scf-to-cf`
-16. `convert-arith-to-llvm`
-17. `finalize-memref-to-llvm`
-18. `convert-func-to-llvm`
-19. `convert-cf-to-llvm`
-20. `reconcile-unrealized-casts`
-21. `mlir-to-llvmir`
-22. LLVM backend codegen
+10. `vortex-plan-local-memory-layout`
+11. `vortex-lower-linalg-inside-kernel`
+12. `vortex-lower-local-memory`
+13. `canonicalize`
+14. `cse`
+15. `vortex-legalize-for-llvm`
+16. `vortex-lower-runtime-builtins`
+17. `convert-scf-to-cf`
+18. `convert-arith-to-llvm`
+19. `finalize-memref-to-llvm`
+20. `convert-func-to-llvm`
+21. `convert-cf-to-llvm`
+22. `reconcile-unrealized-casts`
+23. `mlir-to-llvmir`
+24. LLVM backend codegen
 
 ---
 
@@ -434,17 +507,16 @@ MVP 边界：
 
 如果只看当前仓库状态，下一批最值得实现的 pass 是：
 
-1. `vortex-insert-barriers`
-2. `vortex-lower-linalg-inside-kernel`
-3. `vortex-prepare-to-llvm`
-4. `vortex-convert-to-llvm`
+1. `vortex-legalize-for-llvm` 的 local memory / LLVM 边界收口
+2. `vortex-lower-runtime-builtins` 的 `fence` / `barrier<subgroup>` 补完
+3. 更复杂 local alias 与 local memory runtime 约定继续补完
 
 原因是：
 
-1. `launch` 和 `local_alloc` 已经有了
-2. 但同步语义还没闭合
-3. kernel 内高层计算还没压低
-4. Vortex dialect 还没有真正接到 LLVM/backend
+1. `launch`、`local_alloc`、barrier、local frame layout、local direct access 已经有了
+2. 但 `fence` 与 subgroup barrier 仍未闭合
+3. local `subview` 已接入新的地址模型，但更复杂 alias 仍未覆盖
+4. Vortex dialect 到 LLVM/backend 的边界还需要继续收口
 
 ---
 
@@ -464,11 +536,26 @@ MVP 边界：
 
 1. 从高层 IR 走到混合 Vortex IR
 
-### 3. `vortex-to-llvm-mvp-pipeline`
+### 3. `vortex-mvp-backend-pipeline`
 
 作用：
 
-1. 从混合 Vortex IR 走到 LLVM dialect / LLVM IR
+1. 从 post-local-memory 的混合 Vortex IR 走到 LLVM dialect
+
+状态：
+
+1. 已实现
+2. 当前串起：
+   `canonicalize/cse`
+   -> `vortex-legalize-for-llvm`
+   -> `vortex-lower-runtime-builtins`
+   -> `convert-scf-to-cf`
+   -> `convert-arith-to-llvm`
+   -> `convert-index-to-llvm`
+   -> `finalize-memref-to-llvm`
+   -> `convert-func-to-llvm`
+   -> `convert-cf-to-llvm`
+   -> `reconcile-unrealized-casts`
 
 如果只想先跑通端到端，也可以额外注册：
 
