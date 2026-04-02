@@ -1,7 +1,9 @@
 #include "vortex/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 
 #include "vortex/Dialect/Vortex/IR/VortexAttributes.h"
@@ -37,6 +39,76 @@ static Type materializeGlobalAddressSpace(Type type, MLIRContext *context) {
   }
 
   return type;
+}
+
+static MemRefType retagMemRefTypeMemorySpace(MemRefType type,
+                                             Attribute memorySpace) {
+  return MemRefType::get(type.getShape(), type.getElementType(),
+                         type.getLayout(), memorySpace);
+}
+
+static BaseMemRefType retagBaseMemRefTypeMemorySpace(BaseMemRefType type,
+                                                     Attribute memorySpace) {
+  if (auto memrefType = dyn_cast<MemRefType>(type))
+    return retagMemRefTypeMemorySpace(memrefType, memorySpace);
+  if (auto unrankedType = dyn_cast<UnrankedMemRefType>(type))
+    return UnrankedMemRefType::get(unrankedType.getElementType(), memorySpace);
+  return type;
+}
+
+static LogicalResult rewriteSubviewResultTypes(func::FuncOp func) {
+  SmallVector<memref::SubViewOp> worklist;
+  func.walk([&](memref::SubViewOp subview) { worklist.push_back(subview); });
+
+  IRRewriter rewriter(func.getContext());
+  for (memref::SubViewOp subview : worklist) {
+    auto sourceType = dyn_cast<MemRefType>(subview.getSource().getType());
+    auto resultType = dyn_cast<MemRefType>(subview.getResult().getType());
+    if (!sourceType || !resultType)
+      continue;
+
+    Attribute sourceMemorySpace = sourceType.getMemorySpace();
+    if (!sourceMemorySpace || resultType.getMemorySpace() == sourceMemorySpace)
+      continue;
+
+    MemRefType newResultType =
+        retagMemRefTypeMemorySpace(resultType, sourceMemorySpace);
+    rewriter.setInsertionPoint(subview);
+    auto newSubview = rewriter.create<memref::SubViewOp>(
+        subview.getLoc(), newResultType, subview.getSource(),
+        subview.getMixedOffsets(), subview.getMixedSizes(),
+        subview.getMixedStrides());
+    rewriter.replaceOp(subview, newSubview.getResult());
+  }
+
+  return success();
+}
+
+static LogicalResult rewriteCastResultTypes(func::FuncOp func) {
+  SmallVector<memref::CastOp> worklist;
+  func.walk([&](memref::CastOp castOp) { worklist.push_back(castOp); });
+
+  IRRewriter rewriter(func.getContext());
+  for (memref::CastOp castOp : worklist) {
+    auto sourceType = dyn_cast<BaseMemRefType>(castOp.getSource().getType());
+    auto resultType = dyn_cast<BaseMemRefType>(castOp.getResult().getType());
+    if (!sourceType || !resultType)
+      continue;
+
+    Attribute sourceMemorySpace = sourceType.getMemorySpace();
+    if (!sourceMemorySpace || resultType.getMemorySpace() == sourceMemorySpace)
+      continue;
+
+    BaseMemRefType newResultType =
+        retagBaseMemRefTypeMemorySpace(resultType, sourceMemorySpace);
+    rewriter.setInsertionPoint(castOp);
+    auto newCast = rewriter.create<memref::CastOp>(castOp.getLoc(),
+                                                   newResultType,
+                                                   castOp.getSource());
+    rewriter.replaceOp(castOp, newCast.getResult());
+  }
+
+  return success();
 }
 
 struct MaterializeVortexAddressSpaces
@@ -84,6 +156,16 @@ struct MaterializeVortexAddressSpaces
 
     for (auto [index, newInputType] : llvm::enumerate(newInputTypes))
       func.getArgument(index).setType(newInputType);
+
+    // 前端 bridge 产物里会立刻出现以 kernel 参数为基底的 subview/cast。
+    // 只改函数参数类型会让这些 alias op 的结果类型还停留在默认地址空间，
+    // 从而在 verifier 阶段直接失配。这里先做一个窄修复，只传播到
+    // 当前已经明确会出现的 view/cast 结果类型上。
+    if (failed(rewriteSubviewResultTypes(func)) ||
+        failed(rewriteCastResultTypes(func))) {
+      signalPassFailure();
+      return;
+    }
   }
 };
 
