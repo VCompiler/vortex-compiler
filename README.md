@@ -14,6 +14,7 @@ Out-of-tree MLIR project for:
 - `tools/vx-opt/`：命令行驱动
 - `test/`：lit 测试
 - `examples/`：示例 IR
+- `examples/frontend/`：PyTorch / ONNX / ONNX-MLIR 前端样例与中间产物
 - `docs/`：设计和开发计划
 - `third_party/llvm/`：固定版本的 LLVM/MLIR submodule
 
@@ -105,3 +106,5 @@ cmake --build build --target check-vortex -j$(nproc)
 - `docs/PRE_VORTEX_TO_VORTEX_PASS_PLAN.md`
 - `docs/PRE_VORTEX_TO_VORTEX_GENERAL_LOWERING.md`
 - `docs/MVP_BACKEND_PASS_CHECKLIST.md`
+- `docs/PYTORCH_ONNX_ONNX_MLIR_FRONTEND_PLAN.md`
+- `docs/PHASE1_PYTORCH_FRONTEND_TASKS.md`
