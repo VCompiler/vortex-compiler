@@ -1,46 +1,85 @@
-# mlir-vortex
+# vortex-compiler
 
 Out-of-tree MLIR project for:
 
 1. `Vortex dialect`
-2. `pre-vortex -> vortex` transformation passes
-3. `vx-opt`
-4. tests, examples, and design docs
+2. `pre-vortex -> vortex` passes
+3. `ONNX -> pre-vortex` minimal frontend bridge
+4. `vortex -> LLVM dialect` MVP backend pipeline
+5. `vx-opt`
 
-## 仓库结构
+## Repository
 
-- `include/`：头文件、TableGen 定义
-- `lib/`：dialect、pass、pipeline 实现
-- `tools/vx-opt/`：命令行驱动
-- `test/`：lit 测试
-- `examples/`：示例 IR
-- `examples/frontend/`：PyTorch / ONNX / ONNX-MLIR 前端样例与中间产物
-- `docs/`：设计和开发计划
-- `third_party/llvm/`：固定版本的 LLVM/MLIR submodule
+- `include/`
+- `lib/`
+- `tools/`
+- `scripts/`
+- `test/`
+- `examples/`
+- `docs/`
+- `third_party/llvm/`
 
-## LLVM 依赖
+## Requirements
 
-- 路径：`third_party/llvm`
-- 远程：`https://github.com/vortexgpgpu/llvm.git`
-- 分支：`vortex_2.x`
-- 当前固定 commit：`d78d4a25ebfa0a9145e2c5b2590daccdb56da93a`
+### Core
 
-要求：
+- `git`
+- `cmake >= 3.20`
+- `ninja`
+- `python3`
+- C++17 compiler
 
-1. 先单独构建 LLVM/MLIR
-2. `MLIR_DIR` / `LLVM_DIR` 指向 LLVM/MLIR build 目录中的 CMake package
-3. `third_party/llvm` 只是源码树，不是 build 目录
+Ubuntu:
 
-## 构建
+```bash
+sudo apt update
+sudo apt install -y \
+  git \
+  cmake \
+  ninja-build \
+  python3 \
+  python3-pip \
+  build-essential
+```
 
-### 1. 拉取仓库和 submodule
+### Optional frontend
+
+- `torch`
+- `onnx`
+- `onnx-mlir`
+- `onnx-mlir-opt`
+
+Install Python packages:
+
+```bash
+python3 -m pip install torch onnx
+```
+
+Current frontend script is verified with:
+
+- `onnx-mlir @ 504fcfe`
+
+### Optional board validation
+
+- `vortex-platform`
+- Vivado / JTAG environment
+- matching `.bit` / `.ltx`
+
+### Optional simulation backend
+
+- `vortex-platform`
+- `make`
+- `verilator` for `rtlsim`
+
+## Clone
 
 ```bash
 git clone --recurse-submodules git@github.com:VCompiler/vortex-compiler.git
 cd vortex-compiler
+git submodule update --init --recursive
 ```
 
-### 2. 构建 LLVM/MLIR
+## Build LLVM/MLIR
 
 ```bash
 cmake -S third_party/llvm/llvm -B third_party/llvm-build \
@@ -52,7 +91,7 @@ cmake -S third_party/llvm/llvm -B third_party/llvm-build \
 cmake --build third_party/llvm-build -j$(nproc)
 ```
 
-### 3. 构建 `mlir-vortex`
+## Build vortex-compiler
 
 ```bash
 cmake -S . -B build \
@@ -64,21 +103,7 @@ cmake -S . -B build \
 cmake --build build -j$(nproc)
 ```
 
-### 4. 运行测试
-
-```bash
-cmake --build build --target check-vortex -j$(nproc)
-```
-
-### 5. 使用 `vx-opt`
-
-```bash
-./build/bin/vx-opt --help
-```
-
-## 使用外部 LLVM build
-
-如果已有独立的 LLVM/MLIR build：
+If you already have an external LLVM/MLIR build:
 
 ```bash
 cmake -S . -B build \
@@ -88,23 +113,105 @@ cmake -S . -B build \
   -DVORTEX_ENABLE_TESTS=ON
 
 cmake --build build -j$(nproc)
+```
+
+## Test
+
+```bash
 cmake --build build --target check-vortex -j$(nproc)
 ```
 
-## 当前内容
+## vx-opt
 
-1. `Vortex dialect` 基础骨架
-2. `vortex-pre-vortex-pipeline`
-3. `vortex-mark-kernel`
-4. `vortex-materialize-address-spaces`
-5. `vortex-map-parallel-loops-to-launch`
-6. `vortex-promote-tiles-to-local`
+```bash
+./build/bin/vx-opt --help
+```
 
-## 相关文档
+## Frontend Example
+
+Export ONNX:
+
+```bash
+python3 examples/frontend/pytorch/export_models.py --model all
+```
+
+Lower a static matmul ONNX model to `pre-vortex`:
+
+```bash
+examples/frontend/mlir/lower_onnx_matmul_to_pre_vortex.sh \
+  --input examples/frontend/onnx/matmul_mlp.onnx \
+  --output examples/frontend/mlir/matmul_mlp.pre_vortex.mlir \
+  --onnx-mlir /path/to/onnx-mlir \
+  --onnx-mlir-opt /path/to/onnx-mlir-opt \
+  --vx-opt $PWD/build/bin/vx-opt
+```
+
+## Simulation
+
+Use external `vortex-platform`, or place it at `third_party/vortex-platform`.
+
+Prepare `vortex-platform`:
+
+```bash
+git -C /path/to/vortex-platform submodule update --init --recursive
+```
+
+Run `rtlsim`:
+
+```bash
+scripts/run-vortex-sim.sh \
+  --platform-root /path/to/vortex-platform \
+  --driver rtlsim \
+  --elf /path/to/kernel.elf \
+  --build \
+  --make-var 'CONFIGS=-DNUM_CORES=1 -DNUM_WARPS=4 -DNUM_THREADS=4'
+```
+
+Run `simx`:
+
+```bash
+scripts/run-vortex-sim.sh \
+  --platform-root /path/to/vortex-platform \
+  --driver simx \
+  --bin /path/to/kernel.bin \
+  --build \
+  --sim-arg -c --sim-arg 1 \
+  --sim-arg -w --sim-arg 4 \
+  --sim-arg -t --sim-arg 4
+```
+
+If the shell exports unusable proxy variables, add `--no-proxy`.
+
+## Registered Pipelines
+
+- `vortex-pre-vortex-pipeline`
+- `vortex-onnx-matmul-to-pre-vortex-pipeline`
+- `vortex-mvp-backend-pipeline`
+
+## Implemented Passes
+
+- `vortex-validate-pre-vortex`
+- `vortex-summarize-pre-vortex`
+- `vortex-normalize-onnx-frontend`
+- `vortex-tile-matmul-for-pre-vortex`
+- `vortex-mark-kernel`
+- `vortex-materialize-address-spaces`
+- `vortex-map-parallel-loops-to-launch`
+- `vortex-promote-tiles-to-local`
+- `vortex-insert-barriers`
+- `vortex-plan-local-memory-layout`
+- `vortex-lower-local-memory`
+- `vortex-lower-linalg-inside-kernel`
+- `vortex-legalize-for-llvm`
+- `vortex-lower-runtime-builtins`
+
+## Docs
 
 - `docs/MLIR_IR_DESIGN_AND_PLAN.md`
 - `docs/PRE_VORTEX_TO_VORTEX_PASS_PLAN.md`
 - `docs/PRE_VORTEX_TO_VORTEX_GENERAL_LOWERING.md`
 - `docs/MVP_BACKEND_PASS_CHECKLIST.md`
+- `docs/VORTEX_LOCAL_ALLOC_LOWERING_DESIGN.md`
 - `docs/PYTORCH_ONNX_ONNX_MLIR_FRONTEND_PLAN.md`
 - `docs/PHASE1_PYTORCH_FRONTEND_TASKS.md`
+- `docs/SIMULATION_BACKEND_INTEGRATION.md`
