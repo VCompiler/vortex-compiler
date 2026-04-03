@@ -79,6 +79,22 @@ cd vortex-compiler
 git submodule update --init --recursive
 ```
 
+## Bundled LLVM
+
+This repository vendors LLVM as a git submodule at `third_party/llvm/`.
+
+- upstream repository: `https://github.com/vortexgpgpu/llvm.git`
+- configured tracking branch in `.gitmodules`: `vortex_2.x`
+- LLVM baseline from `third_party/llvm/llvm/CMakeLists.txt`: `18.1.7`
+- current pinned submodule commit in this repository: `d78d4a25ebfa0a9145e2c5b2590daccdb56da93a`
+
+Important:
+
+- this is a Vortex-maintained LLVM fork based on LLVM `18.1.7`, not vanilla upstream LLVM
+- `git submodule update --init --recursive` checks out the pinned commit above
+- it does not automatically move to the latest head of `vortex_2.x`
+- if you intentionally want the newest commit on that branch, update the submodule separately and record the new pinned commit in this repository
+
 ## Build LLVM/MLIR
 
 ```bash
