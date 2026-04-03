@@ -91,6 +91,8 @@ void buildMVPBackendPipeline(OpPassManager &pm) {
 #else
   pm.addPass(createConvertSCFToCFPass());
 #endif
+  pm.addPass(createConvertMathToLLVMPass());
+  pm.addPass(createConvertMathToLibmPass());
   pm.addPass(createArithToLLVMConversionPass());
   pm.addPass(createConvertIndexToLLVMPass());
   pm.addPass(createFinalizeMemRefToLLVMConversionPass());
