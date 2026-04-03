@@ -8,6 +8,12 @@
 2. 每个模型导出一个同名 `.json`
 3. `.json` 里记录输入 shape、opset 和阶段信息
 
+固定 4x4 MatMul ONNX 样例可通过下面脚本生成：
+
+```bash
+python3 examples/frontend/onnx/generate_matmul4x4_model.py
+```
+
 这个目录中的文件应被视为：
 
 1. 前端固定输入样例

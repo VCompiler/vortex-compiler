@@ -8,4 +8,8 @@ target_link_libraries(vx-opt PRIVATE
   MLIROptLib
 )
 
+if(TARGET MLIRRegisterAllPasses)
+  target_link_libraries(vx-opt PRIVATE MLIRRegisterAllPasses)
+endif()
+
 mlir_check_all_link_libraries(vx-opt)

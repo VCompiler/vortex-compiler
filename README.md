@@ -127,6 +127,55 @@ cmake --build build --target check-vortex -j$(nproc)
 ./build/bin/vx-opt --help
 ```
 
+## Build Kernel
+
+```bash
+MLIR_TRANSLATE_BIN=/path/to/mlir-translate \
+LLVM_VORTEX=/path/to/llvm-vortex \
+RISCV_TOOLCHAIN_PATH=/path/to/riscv32-gnu-toolchain \
+RISCV_SYSROOT=$RISCV_TOOLCHAIN_PATH/riscv32-unknown-elf \
+LIBC_VORTEX=/path/to/libc32 \
+LIBCRT_VORTEX=/path/to/libcrt32 \
+scripts/build-vortex-kernel.sh \
+  --input examples/smoke/matmul4x4_f32.mlir \
+  --output-dir build/smoke/matmul4x4_f32 \
+  --platform-root /path/to/vortex-platform \
+  --pass-pipeline 'builtin.module(func.func(vortex-mark-kernel{remove-entry-attr=1},vortex-materialize-address-spaces,vortex-lower-linalg-inside-kernel),canonicalize,cse,vortex-legalize-for-llvm,vortex-lower-runtime-builtins,canonicalize,cse,convert-scf-to-cf,convert-arith-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,convert-func-to-llvm{use-bare-ptr-memref-call-conv=1},convert-cf-to-llvm,reconcile-unrealized-casts)' \
+  --extra-source examples/smoke/matmul4x4_f32_wrapper.c \
+  --build-runtime
+```
+
+## Smoke
+
+```bash
+MLIR_TRANSLATE_BIN=/path/to/mlir-translate \
+LLVM_VORTEX=/path/to/llvm-vortex \
+RISCV_TOOLCHAIN_PATH=/path/to/riscv32-gnu-toolchain \
+RISCV_SYSROOT=$RISCV_TOOLCHAIN_PATH/riscv32-unknown-elf \
+LIBC_VORTEX=/path/to/libc32 \
+LIBCRT_VORTEX=/path/to/libcrt32 \
+scripts/run-matmul4x4-smoke.sh \
+  --platform-root /path/to/vortex-platform \
+  --build-sim
+```
+
+## ONNX Smoke
+
+```bash
+ONNX_FRONT_PYTHON=/path/to/python-with-onnx \
+ONNX_MLIR_BIN=/path/to/onnx-mlir \
+ONNX_MLIR_OPT_BIN=/path/to/onnx-mlir-opt \
+MLIR_TRANSLATE_BIN=/path/to/mlir-translate \
+LLVM_VORTEX=/path/to/llvm-vortex \
+RISCV_TOOLCHAIN_PATH=/path/to/riscv32-gnu-toolchain \
+RISCV_SYSROOT=$RISCV_TOOLCHAIN_PATH/riscv32-unknown-elf \
+LIBC_VORTEX=/path/to/libc32 \
+LIBCRT_VORTEX=/path/to/libcrt32 \
+scripts/run-onnx-matmul4x4-smoke.sh \
+  --platform-root /path/to/vortex-platform \
+  --build-sim
+```
+
 ## Frontend Example
 
 Export ONNX:

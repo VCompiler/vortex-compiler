@@ -8,6 +8,8 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "llvm/Config/llvm-config.h"
+
 #include "vortex/Transforms/Passes.h"
 
 namespace mlir::vortex {
@@ -26,8 +28,12 @@ struct ONNXMatmulToPreVortexPipelineOptions
 
 static void buildONNXMatmulToPreVortexPipeline(
     OpPassManager &pm, const ONNXMatmulToPreVortexPipelineOptions &options) {
+#if LLVM_VERSION_MAJOR >= 19
   bufferization::BufferResultsToOutParamsPassOptions outParamOptions;
   outParamOptions.modifyPublicFunctions = true;
+#else
+  bufferization::BufferResultsToOutParamsOptions outParamOptions;
+#endif
   TileMatmulForPreVortexOptions tileOptions;
   tileOptions.tileSize = options.tileSize;
 
@@ -80,7 +86,11 @@ void buildMVPBackendPipeline(OpPassManager &pm) {
   pm.addPass(createLowerVortexRuntimeBuiltins());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+#if LLVM_VERSION_MAJOR >= 19
   pm.addPass(createSCFToControlFlowPass());
+#else
+  pm.addPass(createConvertSCFToCFPass());
+#endif
   pm.addPass(createArithToLLVMConversionPass());
   pm.addPass(createConvertIndexToLLVMPass());
   pm.addPass(createFinalizeMemRefToLLVMConversionPass());
