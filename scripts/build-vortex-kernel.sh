@@ -360,15 +360,18 @@ fi
 
 declare -a TARGET_FLAGS=()
 if [[ "${XLEN}" == "64" ]]; then
-  TARGET_FLAGS+=(-march=rv64imafd -mabi=lp64d)
+  TARGET_FLAGS+=(--target=riscv64 -march=rv64imafd -mabi=lp64d)
 else
-  TARGET_FLAGS+=(-march=rv32imaf -mabi=ilp32f)
+  TARGET_FLAGS+=(--target=riscv32 -march=rv32imaf -mabi=ilp32f)
 fi
 if [[ -n "${RISCV_SYSROOT_PATH}" ]]; then
   TARGET_FLAGS+=("--sysroot=${RISCV_SYSROOT_PATH}")
 fi
 if [[ -n "${RISCV_TOOLCHAIN_ROOT}" ]]; then
   TARGET_FLAGS+=("--gcc-toolchain=${RISCV_TOOLCHAIN_ROOT}")
+  if [[ -x "${RISCV_TOOLCHAIN_ROOT}/bin/riscv${XLEN}-unknown-elf-ld" ]]; then
+    TARGET_FLAGS+=("-fuse-ld=${RISCV_TOOLCHAIN_ROOT}/bin/riscv${XLEN}-unknown-elf-ld")
+  fi
 fi
 TARGET_FLAGS+=(-Xclang -target-feature -Xclang +vortex)
 TARGET_FLAGS+=("${CLANG_EXTRA_ARGS[@]}")
@@ -470,6 +473,20 @@ link_cmd=(
   -lm
   -lc
 )
+
+# Find and add libgcc for compiler runtime builtins (soft-float, etc.)
+LIBGCC_PATH=""
+if [[ -n "${RISCV_TOOLCHAIN_ROOT}" ]]; then
+  LIBGCC_PATH="$(find -L "${RISCV_TOOLCHAIN_ROOT}" -name "libgcc.a" -path "*/ilp32f/*" 2>/dev/null | head -1)"
+  if [[ -z "${LIBGCC_PATH}" ]]; then
+    LIBGCC_PATH="$(find -L "${RISCV_TOOLCHAIN_ROOT}" -name "libgcc.a" 2>/dev/null | head -1)"
+  fi
+fi
+if [[ -n "${LIBGCC_PATH}" ]]; then
+  link_cmd+=("${LIBGCC_PATH}")
+elif [[ -n "${LIBGCC:-}" ]]; then
+  link_cmd+=("${LIBGCC}")
+fi
 
 if [[ -n "${BUILTINS_LIB}" && -f "${BUILTINS_LIB}" ]]; then
   link_cmd+=("${BUILTINS_LIB}")
