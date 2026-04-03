@@ -27,7 +27,7 @@ Out-of-tree MLIR project for:
 - `cmake >= 3.20`
 - `ninja`
 - `python3`
-- C++17 compiler
+- `clang >= 14` (GCC 13 hits internal compiler errors building this LLVM fork)
 
 Ubuntu:
 
@@ -39,7 +39,8 @@ sudo apt install -y \
   ninja-build \
   python3 \
   python3-pip \
-  build-essential
+  build-essential \
+  clang-18
 ```
 
 ### Optional frontend
@@ -64,6 +65,12 @@ Current frontend script is verified with:
 - `vortex-platform`
 - Vivado / JTAG environment
 - matching `.bit` / `.ltx`
+
+### Optional smoke test / end-to-end
+
+- RISC-V bare-metal toolchain (`riscv32-unknown-elf-gcc`)
+  - expected at `~/tools/riscv32-gnu-toolchain/` or set `RISCV_TOOLCHAIN_PATH`
+- `vortex-platform` (for kernel runtime `libvortex.a`)
 
 ### Optional simulation backend
 
@@ -101,11 +108,18 @@ Important:
 cmake -S third_party/llvm/llvm -B third_party/llvm-build \
   -G Ninja \
   -DLLVM_ENABLE_PROJECTS=mlir \
-  -DLLVM_TARGETS_TO_BUILD=host \
-  -DCMAKE_BUILD_TYPE=Release
+  -DLLVM_TARGETS_TO_BUILD="host;RISCV" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=clang-18 \
+  -DCMAKE_CXX_COMPILER=clang++-18 \
+  -DLLVM_PARALLEL_LINK_JOBS=2
 
 cmake --build third_party/llvm-build -j$(nproc)
 ```
+
+Note: GCC 13 on Ubuntu 24.04 hits internal compiler errors (segfault) building
+this LLVM fork. Use clang instead. `LLVM_PARALLEL_LINK_JOBS=2` prevents OOM
+on machines with less than 32 GB RAM.
 
 ## Build vortex-compiler
 

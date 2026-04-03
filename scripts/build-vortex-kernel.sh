@@ -273,6 +273,8 @@ fi
 LLVM_VORTEX_ROOT="${LLVM_VORTEX:-}"
 if [[ -z "${LLVM_VORTEX_ROOT}" && -d "${REPO_ROOT}/third_party/llvm-vortex-build/bin" ]]; then
   LLVM_VORTEX_ROOT="${REPO_ROOT}/third_party/llvm-vortex-build"
+elif [[ -z "${LLVM_VORTEX_ROOT}" && -d "${REPO_ROOT}/third_party/llvm-build/bin" ]]; then
+  LLVM_VORTEX_ROOT="${REPO_ROOT}/third_party/llvm-build"
 fi
 
 TARGET_BIN_DIR=""
