@@ -1,5 +1,39 @@
 # 简化版 GPT-2 on Vortex：差距分析与实施清单
 
+## 0. 当前进度
+
+> 最后更新：2026-04-04
+
+| Step | 内容 | 状态 |
+|------|------|------|
+| Step 1 | math-to-llvm/libm lowering 通路 | ✅ 已合入 main |
+| Step 2 | reduce_sum / reduce_max 端到端 simx 验证 | ✅ passed |
+| Step 3 | GeLU / Softmax / LayerNorm 端到端 simx 验证 | ✅ passed |
+| Step 4 | MLP block (matmul → GeLU → matmul) | ✅ passed |
+| Step 5 | Single-head attention (QKV + K^T + softmax + output) | ✅ passed |
+| Step 6 | 完整 Transformer block (LN + Attn + Res + LN + MLP + Res) | ✅ passed |
+| Step 7 | 扩展到真实尺寸 (seq=32, d=64) | 未开始 |
+| Step 8 | 多 block / embedding / lm_head | 未开始 |
+| Step 9 | ONNX 前端自动化 | 未开始 |
+
+**核心结论：单个 Transformer block 已在 simx 上端到端跑通（seq=4, d=8, 1-head, f32），
+8 个 kernel 全部通过数值验证。**
+
+已验证的 kernel（全部在 `examples/gpt2/` 下）：
+
+```
+reduce_sum.mlir          → simx passed (sum=136)
+reduce_max.mlir          → simx passed (max=16)
+gelu.mlir                → simx passed (vs erff reference)
+softmax.mlir             → simx passed (row sums=1.0)
+layernorm.mlir           → simx passed (mean≈0, var≈1)
+mlp_block.mlir           → simx passed
+attention.mlir           → simx passed
+transformer_block.mlir   → simx passed
+```
+
+---
+
 ## 1. 目标
 
 ### 1.1 最终目标
@@ -122,7 +156,7 @@ Layer 4: 完整 Transformer block      ← 组装 + 端到端数值对齐
 
 ## 4. 方案拆解
 
-### Step 1: 补 math lowering 通路
+### Step 1: 补 math lowering 通路 ✅
 
 **目标：** 让 `math.exp`、`math.sqrt`、`math.erf`、`math.tanh` 能走完 pipeline 到 LLVM IR。
 
@@ -148,7 +182,7 @@ Layer 4: 完整 Transformer block      ← 组装 + 端到端数值对齐
 
 ---
 
-### Step 2: 验证 reduction kernel 端到端
+### Step 2: 验证 reduction kernel 端到端 ✅
 
 **目标：** 确认 `linalg.generic` 带 reduction iterator 能走完 pipeline 到 simx 并数值正确。
 
@@ -172,7 +206,7 @@ Layer 4: 完整 Transformer block      ← 组装 + 端到端数值对齐
 
 ---
 
-### Step 3: 验证 math kernel 端到端
+### Step 3: 验证 math kernel 端到端 ✅
 
 **目标：** 确认 `math.exp`、`math.sqrt`、`math.erf` 在 simx 上数值正确。
 
@@ -193,7 +227,7 @@ Layer 4: 完整 Transformer block      ← 组装 + 端到端数值对齐
 
 ---
 
-### Step 4: GeLU kernel
+### Step 4: GeLU kernel ✅
 
 **目标：** GeLU(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
 
@@ -218,7 +252,7 @@ Layer 4: 完整 Transformer block      ← 组装 + 端到端数值对齐
 
 ---
 
-### Step 5: Softmax kernel
+### Step 5: Softmax kernel ✅
 
 **目标：** softmax(x, axis=-1) 数值稳定版
 
@@ -237,7 +271,7 @@ Layer 4: 完整 Transformer block      ← 组装 + 端到端数值对齐
 
 ---
 
-### Step 6: LayerNorm kernel
+### Step 6: LayerNorm kernel ✅
 
 **目标：** LayerNorm(x, gamma, beta, eps=1e-5)
 
@@ -257,7 +291,7 @@ Layer 4: 完整 Transformer block      ← 组装 + 端到端数值对齐
 
 ---
 
-### Step 7: MLP subgraph
+### Step 7: MLP subgraph ✅
 
 **目标：** matmul → GeLU → matmul
 
@@ -275,7 +309,7 @@ Layer 4: 完整 Transformer block      ← 组装 + 端到端数值对齐
 
 ---
 
-### Step 8: Single-head attention subgraph
+### Step 8: Single-head attention subgraph ✅
 
 **目标：** Q/K/V projection → score → softmax → value aggregation → output projection
 
@@ -298,7 +332,7 @@ Layer 4: 完整 Transformer block      ← 组装 + 端到端数值对齐
 
 ---
 
-### Step 9: 完整 Transformer block
+### Step 9: 完整 Transformer block ✅
 
 **目标：** LayerNorm + Attention + Residual + LayerNorm + MLP + Residual
 
@@ -349,13 +383,23 @@ examples/gpt2/
 | kernel 太大寄存器溢出 | 完整 block 编译失败或性能极差 | 拆成多个 kernel 分步调用 |
 | simx exit code 约定 | 脚本误判失败 | wrapper 统一用 `vx_putchar` 输出结果标记 |
 
-## 7. 不在本阶段范围内
+## 7. 下一阶段工作
 
-- ONNX 前端 bridge 扩展
-- PyTorch 自动导出
-- 多 Transformer block
+第一阶段目标（单个 Transformer block, simx 数值验证）已完成。
+
+下一阶段可选方向：
+
+1. **扩展尺寸** — seq=32, d=64, d_ff=256，验证更大 kernel 的 codegen 稳定性和寄存器压力
+2. **多 block** — 串联 N 个 Transformer block
+3. **加载真实权重** — 从文件读取 GPT-2 权重而非硬编码
+4. **embedding / lm_head** — 补齐推理链路的首尾
+5. **ONNX 前端自动化** — PyTorch 导出 → ONNX → 自动编译
+6. **多核并行** — 利用 vortex.launch 做 core/warp/thread 映射
+7. **性能优化** — tiling、local memory promotion for attention
+
+## 8. 不在当前范围内
+
 - KV cache / decode loop
-- embedding / lm_head
-- 性能优化（tiling、local memory promotion for attention）
 - bf16 / fp16
-- 多核 / 多 warp 并行
+- 训练
+- 动态 shape
