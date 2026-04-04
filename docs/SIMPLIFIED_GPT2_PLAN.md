@@ -13,9 +13,9 @@
 | Step 5 | Single-head attention (QKV + K^T + softmax + output) | ✅ passed |
 | Step 6 | 完整 Transformer block (LN + Attn + Res + LN + MLP + Res) | ✅ passed |
 | **第二阶段** | | |
-| M2.1 | 放大到 seq=32, d=64 | 未开始 |
-| M2.2 | 权重从文件加载 | 未开始 |
-| M2.3 | 4 层 block 串联 | 未开始 |
+| M2.1 | 放大到 seq=32, d=64 | ✅ passed (max_diff=0.0167) |
+| M2.2 | 权重从文件加载 | ✅ passed (max_diff=0.0000) |
+| M2.3 | 4 层 block 串联 | ✅ passed (max_diff=0.0000) |
 | **第三阶段** | | |
 | M3.1 | Token embedding kernel | 未开始 |
 | M3.2 | Position embedding | 未开始 |
