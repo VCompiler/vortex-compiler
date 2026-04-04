@@ -14,6 +14,8 @@ int main(int argc, char **argv) {
   mlir::registerConvertFuncToLLVMPass();
   mlir::registerConvertIndexToLLVMPass();
   mlir::registerFinalizeMemRefToLLVMConversionPass();
+  mlir::registerConvertMathToLLVMPass();
+  mlir::registerConvertMathToLibm();
   mlir::registerReconcileUnrealizedCasts();
   mlir::registerSCFToControlFlow();
   mlir::vortex::registerVortexPassesAndPipelines();
