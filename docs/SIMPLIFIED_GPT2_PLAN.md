@@ -17,10 +17,10 @@
 | M2.2 | 权重从文件加载 | ✅ passed (max_diff=0.0000) |
 | M2.3 | 4 层 block 串联 | ✅ passed (max_diff=0.0000) |
 | **第三阶段** | | |
-| M3.1 | Token embedding kernel | 未开始 |
-| M3.2 | Position embedding | 未开始 |
-| M3.3 | LM head (output projection) | 未开始 |
-| M3.4 | 端到端 forward (token_ids → logits) | 未开始 |
+| M3.1 | Token embedding kernel | ✅ passed |
+| M3.2 | Position embedding | ✅ passed (合并在 embedding kernel 中) |
+| M3.3 | LM head (output projection) | ✅ passed (max_diff=0.0000) |
+| M3.4 | 端到端 forward (token_ids → logits) | ✅ passed (32x64, 4 layers, max_diff=0.0000) |
 | **第四阶段** | | |
 | M4.1 | matmul 多核并行 | 未开始 |
 | M4.2 | attention 并行 | 未开始 |
