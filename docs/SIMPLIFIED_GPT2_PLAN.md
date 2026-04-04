@@ -26,9 +26,8 @@
 | M4.2 | attention 并行 | 未开始 |
 | M4.3 | 性能基线建立 | 未开始 |
 | **第五阶段** | | |
-| M5.1-M5.2 | ONNX bridge 基础算子 | 未开始 |
-| M5.3-M5.4 | ONNX bridge 复合算子 | 未开始 |
-| M5.5 | 全自动 PyTorch → simx | 未开始 |
+| M5 | PyTorch → Vortex 自动导出 | ✅ passed (小尺寸 exact match, 大尺寸 simx 运行中) |
+| | 策略变更：跳过 ONNX-MLIR，直接从 PyTorch 权重生成 MLIR | |
 
 **核心结论：单个 Transformer block 已在 simx 上端到端跑通（seq=4, d=8, 1-head, f32），
 8 个 kernel 全部通过数值验证。**
