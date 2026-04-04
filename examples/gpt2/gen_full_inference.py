@@ -160,13 +160,13 @@ def gen_embedding_mlir(S: int, D: int, V: int) -> str:
       attributes {{vortex.entry}} {{
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    %c{S} = arith.constant {S} : index
-    %c{D} = arith.constant {D} : index
+    %c_seq = arith.constant {S} : index
+    %c_dim = arith.constant {D} : index
 
-    scf.for %i = %c0 to %c{S} step %c1 {{
+    scf.for %i = %c0 to %c_seq step %c1 {{
       %tok_id_i32 = memref.load %token_ids[%i] : memref<{S}xi32>
       %tok_id = arith.index_cast %tok_id_i32 : i32 to index
-      scf.for %j = %c0 to %c{D} step %c1 {{
+      scf.for %j = %c0 to %c_dim step %c1 {{
         %tok_val = memref.load %tok_table[%tok_id, %j] : memref<{V}x{D}xf32>
         %pos_val = memref.load %pos_table[%i, %j] : memref<{S}x{D}xf32>
         %sum = arith.addf %tok_val, %pos_val : f32
