@@ -422,6 +422,8 @@ def main():
                         help="Random seed (default: 42)")
     parser.add_argument("--out-dir", type=str, required=True,
                         help="Output directory for generated files")
+    parser.add_argument("--external-weights", action="store_true",
+                        help="Generate binary weight files + host driver instead of embedded weights.h")
     args = parser.parse_args()
 
     S = args.seq
@@ -539,6 +541,8 @@ def main():
         "--seed", str(seed),
         "--out-dir", out_dir,
     ]
+    if args.external_weights:
+        cmd.append("--external-weights")
     print(f"\nCalling gen_full_inference.py to generate MLIR + C wrapper...")
     print(f"  {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -548,10 +552,28 @@ def main():
         sys.exit(1)
     print(result.stdout)
 
-    # Overwrite the weights header with our PyTorch-derived version
-    with open(header_path, "w") as f:
-        f.write(header_content)
-    print(f"Overwrote {header_path} with PyTorch-derived weights")
+    # Overwrite weights with PyTorch-derived version
+    if args.external_weights:
+        # Write binary weights blob
+        script_dir_for_import = os.path.dirname(os.path.abspath(__file__))
+        if script_dir_for_import not in sys.path:
+            sys.path.insert(0, script_dir_for_import)
+        from gen_full_inference import write_weights_bin
+        weights_bin_path = os.path.join(out_dir, "weights.bin")
+        write_weights_bin(weights_bin_path, token_ids_np, tok_table, pos_table,
+                          all_layers_weights,
+                          final_ln_gamma, final_ln_beta, lm_head_w)
+        print(f"Overwrote {weights_bin_path} with PyTorch-derived weights")
+
+        # Write golden logits binary
+        golden_bin_path = os.path.join(out_dir, "golden.bin")
+        with open(golden_bin_path, "wb") as f:
+            f.write(golden_logits.ravel().astype(np.float32).tobytes())
+        print(f"Overwrote {golden_bin_path} with PyTorch-derived golden")
+    else:
+        with open(header_path, "w") as f:
+            f.write(header_content)
+        print(f"Overwrote {header_path} with PyTorch-derived weights")
 
     # ------------------------------------------------------------------
     # Step 7: Write manifest
@@ -571,6 +593,7 @@ def main():
         "weight_order": WEIGHT_ORDER,
         "total_weight_floats": total_weights,
         "golden_logits_shape": list(golden_logits.shape),
+        "external_weights": args.external_weights,
     }
     manifest_path = os.path.join(out_dir, "manifest.json")
     with open(manifest_path, "w") as f:
@@ -586,18 +609,31 @@ def main():
     print(f"{'='*60}")
     print(f"  Model:  seq={S}, dim={D}, ff={FF}, vocab={V}, layers={N}")
     print(f"  Seed:   {seed}")
+    print(f"  Mode:   {'external weights' if args.external_weights else 'embedded weights'}")
     print(f"  Output: {out_dir}/")
-    print(f"    full_inference.mlir          -- MLIR module")
-    print(f"    full_inference_wrapper.c     -- C wrapper")
-    print(f"    full_inference_weights.h     -- weights + golden logits")
+    if args.external_weights:
+        print(f"    full_inference.mlir      -- MLIR module")
+        print(f"    gpt2_kernel.c            -- kernel code (RISC-V)")
+        print(f"    gpt2_host.cpp            -- host driver (x86)")
+        print(f"    gpt2_common.h            -- shared header")
+        print(f"    weights.bin              -- binary weights")
+        print(f"    golden.bin               -- golden logits")
+    else:
+        print(f"    full_inference.mlir          -- MLIR module")
+        print(f"    full_inference_wrapper.c     -- C wrapper")
+        print(f"    full_inference_weights.h     -- weights + golden logits")
     print(f"    manifest.json")
     print(f"")
     print(f"  Total weight floats: {total_weights}")
     print(f"  Golden logits: {golden_logits.shape}")
     print(f"  Golden logits sample: {golden_logits.ravel()[:8]}")
     print(f"")
-    print(f"To build and run on simx:")
-    print(f"  bash examples/gpt2/run_full_inference.sh {out_dir}")
+    if args.external_weights:
+        print(f"To build and run on simx:")
+        print(f"  bash examples/gpt2/run_external_weights.sh {out_dir}")
+    else:
+        print(f"To build and run on simx:")
+        print(f"  bash examples/gpt2/run_full_inference.sh {out_dir}")
 
 
 if __name__ == "__main__":
