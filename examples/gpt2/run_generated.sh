@@ -49,7 +49,7 @@ clang-18 --target=riscv32 -march=rv32imaf -mabi=ilp32f \
 clang-18 --target=riscv32 -march=rv32imaf -mabi=ilp32f \
   --sysroot="$TOOLCHAIN/riscv32-unknown-elf" --gcc-toolchain="$TOOLCHAIN" \
   -O3 -mcmodel=medany -fno-exceptions -fdata-sections -ffunction-sections \
-  -I"$PLATFORM/kernel/include" -I"$PLATFORM/hw" \
+  -I"$PLATFORM/kernel/include" -I"$PLATFORM/hw" -I"$REPO_ROOT" -I"$DIR" \
   -c "$WRAPPER" -o "$OUTDIR/${NAME}_wrapper.o" 2>&1
 
 echo "[4/5] link"
