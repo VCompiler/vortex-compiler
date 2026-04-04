@@ -12,9 +12,23 @@
 | Step 4 | MLP block (matmul → GeLU → matmul) | ✅ passed |
 | Step 5 | Single-head attention (QKV + K^T + softmax + output) | ✅ passed |
 | Step 6 | 完整 Transformer block (LN + Attn + Res + LN + MLP + Res) | ✅ passed |
-| Step 7 | 扩展到真实尺寸 (seq=32, d=64) | 未开始 |
-| Step 8 | 多 block / embedding / lm_head | 未开始 |
-| Step 9 | ONNX 前端自动化 | 未开始 |
+| **第二阶段** | | |
+| M2.1 | 放大到 seq=32, d=64 | 未开始 |
+| M2.2 | 权重从文件加载 | 未开始 |
+| M2.3 | 4 层 block 串联 | 未开始 |
+| **第三阶段** | | |
+| M3.1 | Token embedding kernel | 未开始 |
+| M3.2 | Position embedding | 未开始 |
+| M3.3 | LM head (output projection) | 未开始 |
+| M3.4 | 端到端 forward (token_ids → logits) | 未开始 |
+| **第四阶段** | | |
+| M4.1 | matmul 多核并行 | 未开始 |
+| M4.2 | attention 并行 | 未开始 |
+| M4.3 | 性能基线建立 | 未开始 |
+| **第五阶段** | | |
+| M5.1-M5.2 | ONNX bridge 基础算子 | 未开始 |
+| M5.3-M5.4 | ONNX bridge 复合算子 | 未开始 |
+| M5.5 | 全自动 PyTorch → simx | 未开始 |
 
 **核心结论：单个 Transformer block 已在 simx 上端到端跑通（seq=4, d=8, 1-head, f32），
 8 个 kernel 全部通过数值验证。**
@@ -383,23 +397,260 @@ examples/gpt2/
 | kernel 太大寄存器溢出 | 完整 block 编译失败或性能极差 | 拆成多个 kernel 分步调用 |
 | simx exit code 约定 | 脚本误判失败 | wrapper 统一用 `vx_putchar` 输出结果标记 |
 
-## 7. 下一阶段工作
+## 7. 第二阶段：扩展到真实尺寸 + 多 block
 
-第一阶段目标（单个 Transformer block, simx 数值验证）已完成。
+### 7.1 目标
 
-下一阶段可选方向：
+```
+4 层 Transformer block, seq_len=32, d_model=64, d_ff=256, 1 head, f32
+权重从二进制文件加载，simx 数值对齐
+```
 
-1. **扩展尺寸** — seq=32, d=64, d_ff=256，验证更大 kernel 的 codegen 稳定性和寄存器压力
-2. **多 block** — 串联 N 个 Transformer block
-3. **加载真实权重** — 从文件读取 GPT-2 权重而非硬编码
-4. **embedding / lm_head** — 补齐推理链路的首尾
-5. **ONNX 前端自动化** — PyTorch 导出 → ONNX → 自动编译
-6. **多核并行** — 利用 vortex.launch 做 core/warp/thread 映射
-7. **性能优化** — tiling、local memory promotion for attention
+内存预估：4 层约 900 KB 权重 + 120 KB 激活，simx 虚拟内存按需分配，无硬限制。
 
-## 8. 不在当前范围内
+### 7.2 里程碑
 
-- KV cache / decode loop
-- bf16 / fp16
-- 训练
-- 动态 shape
+| 编号 | 里程碑 | 验收标准 |
+|------|--------|----------|
+| M2.1 | 单 block 放大到 seq=32, d=64 | simx passed，与 Python reference 对齐 |
+| M2.2 | 权重从文件加载 | 不再硬编码权重，C wrapper 从 `.bin` 文件读取 |
+| M2.3 | 4 层 block 串联 | simx passed，逐层数值与 PyTorch 对齐 |
+
+### 7.3 任务拆解
+
+**M2.1 — 放大尺寸**
+
+现状：当前 transformer_block.mlir 硬编码 seq=4, d=8。
+风险：更大 kernel 可能触发寄存器溢出、栈溢出、或 codegen bug。
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T2.1.1 | 参数化 MLIR 生成 | Python 脚本 `gen_transformer_mlir.py`，输入 seq/d/d_ff，输出 `.mlir` 文件 |
+| T2.1.2 | 参数化 C wrapper 生成 | Python 脚本 `gen_wrapper.py`，输入 seq/d/d_ff，输出 `_wrapper.c` 文件 |
+| T2.1.3 | 渐进测试 | seq=8/d=16 → seq=16/d=32 → seq=32/d=64，每步 simx 验证 |
+| T2.1.4 | 如果寄存器溢出 | 拆成多个 kernel（attention 单独、MLP 单独），wrapper 依次调用 |
+
+**M2.2 — 权重加载**
+
+现状：权重硬编码在 C wrapper 里。真实推理需要从文件读取。
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T2.2.1 | Python 权重导出 | `export_weights.py`：PyTorch 随机初始化或加载预训练权重 → 逐层导出为 raw float32 `.bin` |
+| T2.2.2 | Python reference 生成 | `gen_golden.py`：用 PyTorch 跑 forward，导出每层输入/输出为 `.bin`，供逐层对比 |
+| T2.2.3 | C 权重加载器 | `weight_loader.c`：在 simx 上用 `vx_dev_read()` 或直接内存映射从 `.bin` 加载权重到 buffer |
+| T2.2.4 | 端到端验证 | wrapper 加载权重 → 跑 kernel → 比对 golden → simx passed |
+
+**M2.3 — 多 block 串联**
+
+现状：只有单个 block。GPT-2-small 有 12 层，我们先做 4 层。
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T2.3.1 | 多 block MLIR | 生成脚本输出 4 层 block，每层独立 kernel 函数（`@block_0`, `@block_1`, ...） |
+| T2.3.2 | 多 block wrapper | C wrapper 依次调用 4 个 block kernel，中间传递激活 |
+| T2.3.3 | 逐层数值对比 | 每层输出与 PyTorch golden 比对，定位精度累积 |
+| T2.3.4 | 放宽误差阈值 | 如果 4 层累积误差超出 1e-2，评估是否可接受或需要改进数值稳定性 |
+
+---
+
+## 8. 第三阶段：完整推理链路
+
+### 8.1 目标
+
+```
+完整 GPT-2 推理：token_ids → embedding → N x Transformer block → lm_head → logits
+在 simx 上跑通，输出 logits 与 PyTorch 对齐
+```
+
+### 8.2 里程碑
+
+| 编号 | 里程碑 | 验收标准 |
+|------|--------|----------|
+| M3.1 | Token embedding kernel | 给定 token_id 序列，查表输出 embedding 矩阵，simx 数值对齐 |
+| M3.2 | Position embedding | 位置编码加到 token embedding 上 |
+| M3.3 | LM head (output projection) | 最后一层输出 → vocab logits |
+| M3.4 | 端到端 forward | token_ids → logits，单次推理完整链路 |
+
+### 8.3 任务拆解
+
+**M3.1 — Token embedding**
+
+embedding 本质是查表：`output[i] = embedding_table[token_id[i]]`
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T3.1.1 | embedding kernel MLIR | 输入 `memref<32xi32>`(token_ids) + `memref<256x64xf32>`(table)，输出 `memref<32x64xf32>` |
+| T3.1.2 | 实现方式 | 用 `scf.for` + `memref.load`(index) + `memref.copy`(行) 或 linalg.generic |
+| T3.1.3 | 验证 | simx 输出与直接查表结果一致 |
+
+**M3.2 — Position embedding**
+
+GPT-2 的位置编码是可学习参数，不是 sinusoidal。
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T3.2.1 | position embedding kernel | 和 token embedding 同样的查表，然后 elementwise add |
+| T3.2.2 | 合并到 embedding 阶段 | `output = token_emb + pos_emb`，一个 kernel 完成 |
+
+**M3.3 — LM head**
+
+LM head = 最终 LayerNorm + 线性投影到 vocab 维度。
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T3.3.1 | final LayerNorm | 复用已有 LayerNorm pattern |
+| T3.3.2 | vocab projection | `memref<32x64xf32>` @ `memref<64x256xf32>` → `memref<32x256xf32>` (logits) |
+| T3.3.3 | argmax (可选) | 取 logits 最大值的 index 作为预测 token |
+
+**M3.4 — 端到端**
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T3.4.1 | 完整 wrapper | C main: 加载权重 → embedding → N blocks → lm_head → 输出 logits |
+| T3.4.2 | PyTorch golden | 用相同权重和输入跑 PyTorch forward，导出 logits |
+| T3.4.3 | 数值对比 | simx logits 与 PyTorch logits 对比，验证 top-k 一致性 |
+
+---
+
+## 9. 第四阶段：多核并行
+
+### 9.1 目标
+
+```
+利用 Vortex 多核/多 warp/多 thread 硬件并行，加速 Transformer block 执行
+```
+
+### 9.2 里程碑
+
+| 编号 | 里程碑 | 验收标准 |
+|------|--------|----------|
+| M4.1 | matmul 行并行 | matmul 外层循环映射到 core/warp，simx 多核配置下数值正确 |
+| M4.2 | attention 并行 | seq 维度映射到并行层级 |
+| M4.3 | 性能基线 | 建立 simx cycle count 基线，与单核对比 |
+
+### 9.3 任务拆解
+
+**M4.1 — matmul 并行**
+
+当前所有 kernel 都在单核单线程上跑。Vortex 的编程模型是
+给 `scf.for` 加 `vortex.mapping` 属性，让 pass 自动映射到 `vortex.launch`。
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T4.1.1 | 标注 matmul 外层循环 | 给 M 维度的 `scf.for` 加 `vortex.mapping = "core"` |
+| T4.1.2 | 跑通 vortex.launch pipeline | 确认 mark-kernel → map-loops-to-launch → lower → simx 正确 |
+| T4.1.3 | 多核 simx 验证 | `simx -c 4 -w 4 -t 4`，数值与单核一致 |
+
+**M4.2 — attention 并行**
+
+attention 里的多个 matmul 可以在 seq 维度并行。softmax 的 reduction 需要在并行后做 barrier。
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T4.2.1 | attention seq 维度并行 | Q/K/V projection 的 seq 维度映射到 core |
+| T4.2.2 | softmax 并行化 | reduce_max/reduce_sum 需要跨线程协作，用 local memory + barrier |
+| T4.2.3 | 完整 attention 并行验证 | 多核 simx 数值对齐 |
+
+**M4.3 — 性能基线**
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T4.3.1 | 统计 simx cycle count | 用 `simx -s` 输出性能统计 |
+| T4.3.2 | 建立基线表 | 单核 vs 多核 cycle count 对比 |
+| T4.3.3 | 识别瓶颈 | 分析是 compute bound 还是 memory bound |
+
+---
+
+## 10. 第五阶段：前端自动化
+
+### 10.1 目标
+
+```
+PyTorch GPT-2 模型 → ONNX → ONNX-MLIR → vortex-compiler → simx
+全自动，不需要手写 MLIR
+```
+
+### 10.2 里程碑
+
+| 编号 | 里程碑 | 验收标准 |
+|------|--------|----------|
+| M5.1 | ONNX bridge 支持 elementwise ops | Add/Sub/Mul/Div/Sqrt 等走通 |
+| M5.2 | ONNX bridge 支持 reduction | ReduceMean/ReduceSum/ReduceMax 走通 |
+| M5.3 | ONNX bridge 支持 Softmax/LayerNorm | 作为复合子图走通 |
+| M5.4 | ONNX bridge 支持 attention pattern | MatMul + Transpose + Softmax 组合走通 |
+| M5.5 | 自动编译简化版 GPT-2 | PyTorch → ONNX → vx-opt → simx 全自动 |
+
+### 10.3 任务拆解
+
+**M5.1-M5.2 — 基础算子 bridge**
+
+当前 `NormalizeONNXFrontendPass` 只做 metadata 清理，`TileMatmulForPreVortexPass` 只处理 matmul。
+ONNX-MLIR 本身会把大部分 ONNX ops lower 到 `linalg`/`arith`/`math`，
+所以关键是确认 ONNX-MLIR 的输出能被现有 vortex pipeline 接受。
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T5.1.1 | 调研 ONNX-MLIR 输出 | 用 ONNX-MLIR 编译简化版 GPT-2 block 的 ONNX，检查输出 IR 的 dialect 集合 |
+| T5.1.2 | 识别不兼容 op | 列出 ONNX-MLIR 输出中 vortex pre-vortex 白名单不接受的 op |
+| T5.1.3 | 补齐 bridge pass | 对不兼容 op 写转换规则或在 ONNX-MLIR 侧调整 lowering 选项 |
+| T5.1.4 | elementwise 验证 | 用 ONNX Add/Mul/Div 模型走通 ONNX → vx-opt → simx |
+
+**M5.3-M5.4 — 复合算子 bridge**
+
+ONNX 的 Softmax/LayerNormalization 可能被 ONNX-MLIR 分解成多个 linalg 操作。
+需要确认分解结果能走完 vortex pipeline。
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T5.3.1 | Softmax 子图验证 | ONNX Softmax → ONNX-MLIR → vx-opt → simx |
+| T5.3.2 | LayerNorm 子图验证 | 同上 |
+| T5.3.3 | Attention pattern | ONNX MatMul + Softmax 组合 → vx-opt → simx |
+| T5.3.4 | bufferization 调优 | 确认 ONNX-MLIR 的 tensor → buffer 转换适配 vortex pipeline |
+
+**M5.5 — 端到端自动化**
+
+| 任务 | 内容 | 交付物 |
+|------|------|--------|
+| T5.5.1 | 导出脚本 | `export_gpt2_block.py`：PyTorch → ONNX |
+| T5.5.2 | 一键编译脚本 | `compile_gpt2.sh`：ONNX → ONNX-MLIR → vx-opt → ELF |
+| T5.5.3 | 端到端验证 | 从 PyTorch 到 simx 全自动，数值对齐 |
+
+---
+
+## 11. 阶段间依赖关系
+
+```
+第一阶段 (已完成)
+  单 block, 小尺寸, 手写 MLIR, simx 验证
+       │
+       ▼
+第二阶段 ─────────────────────────────────┐
+  放大尺寸, 多 block, 权重加载             │
+       │                                   │
+       ▼                                   ▼
+第三阶段                             第五阶段
+  完整推理链路                         前端自动化
+  (embedding → blocks → lm_head)     (ONNX bridge 扩展)
+       │                                   │
+       ▼                                   │
+第四阶段                                   │
+  多核并行                                 │
+       │                                   │
+       ▼                                   ▼
+   ┌────────────────────────────────────────┐
+   │  最终目标：自动编译 + 并行执行 GPT-2   │
+   └────────────────────────────────────────┘
+```
+
+第二阶段是后续所有阶段的前提。第三阶段和第五阶段可以并行推进。
+第四阶段依赖第三阶段（需要完整推理链路才能有意义地做并行优化）。
+
+## 12. 不在规划范围内
+
+- KV cache / 自回归 decode loop
+- bf16 / fp16 混合精度
+- 训练 / 反向传播
+- 动态 shape / 动态 seq_len
+- 真实 GPT-2-small (d=768, 12 层) — 当前规划用缩减版 (d=64, 4 层)
+- FPGA 板级性能调优
