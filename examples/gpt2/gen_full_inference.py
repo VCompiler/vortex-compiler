@@ -775,6 +775,36 @@ extern void lm_head(
 #define D_FF  {FF}
 #define V     {V}
 
+/* All large buffers are static (BSS segment -> DDR) to avoid stack overflow.
+ * Board stack is only 8 KB/thread; these buffers can be megabytes. */
+
+/* Stage 1: Embedding buffers */
+static int emb_token_ids[S];
+static float emb_tok_table[V * D];
+static float emb_pos_table[S * D];
+static float x_cur[S * D];
+
+/* Stage 2: Transformer block weight + scratch buffers */
+static float tb_ln1_gamma[D], tb_ln1_beta[D];
+static float tb_wq[D * D], tb_wk[D * D], tb_wv[D * D], tb_wo[D * D];
+static float tb_ln2_gamma[D], tb_ln2_beta[D];
+static float tb_w1[D * D_FF], tb_w2[D_FF * D];
+static float tb_x_out[S * D];
+static float tb_x_ln[S * D];
+static float tb_q[S * D], tb_k[S * D], tb_v[S * D];
+static float tb_score[S * S], tb_prob[S * S];
+static float tb_attn[S * D], tb_attn_out[S * D];
+static float tb_x_ln2[S * D], tb_hidden[S * D_FF];
+static float tb_ln_mean[S], tb_ln_var[S];
+static float tb_sm_max[S], tb_sm_sum[S];
+
+/* Stage 3: LM Head buffers */
+static float lm_gamma[D], lm_beta[D];
+static float lm_w_proj[D * V];
+static float logits[S * V];
+static float lm_ln_out[S * D];
+static float lm_ln_mean[S], lm_ln_var[S];
+
 int main() {{
   if (vx_thread_id() != 0 || vx_warp_id() != 0 || vx_core_id() != 0)
     return 0;
@@ -782,11 +812,6 @@ int main() {{
   /* ==================================================================
    * Stage 1: Embedding
    * ================================================================== */
-
-  int emb_token_ids[S];
-  float emb_tok_table[V * D];
-  float emb_pos_table[S * D];
-  float x_cur[S * D];  /* current hidden state, reused across stages */
 
   /* Load embedding inputs from static const arrays */
   for (int i = 0; i < S; i++)
@@ -802,33 +827,11 @@ int main() {{
    * Stage 2: Transformer blocks (x {N} layers)
    * ================================================================== */
 
-  /* Transformer block weight buffers */
-  float tb_ln1_gamma[D], tb_ln1_beta[D];
-  float tb_wq[D * D], tb_wk[D * D], tb_wv[D * D], tb_wo[D * D];
-  float tb_ln2_gamma[D], tb_ln2_beta[D];
-  float tb_w1[D * D_FF], tb_w2[D_FF * D];
-
-  /* Transformer block scratch buffers */
-  float tb_x_out[S * D];
-  float tb_x_ln[S * D];
-  float tb_q[S * D], tb_k[S * D], tb_v[S * D];
-  float tb_score[S * S], tb_prob[S * S];
-  float tb_attn[S * D], tb_attn_out[S * D];
-  float tb_x_ln2[S * D], tb_hidden[S * D_FF];
-  float tb_ln_mean[S], tb_ln_var[S];
-  float tb_sm_max[S], tb_sm_sum[S];
-
 {layer_code}
 
   /* ==================================================================
    * Stage 3: LM Head (final LayerNorm + vocab projection)
    * ================================================================== */
-
-  float lm_gamma[D], lm_beta[D];
-  float lm_w_proj[D * V];
-  float logits[S * V];
-  float lm_ln_out[S * D];
-  float lm_ln_mean[S], lm_ln_var[S];
 
   for (int i = 0; i < D; i++) {{
     lm_gamma[i] = final_ln_gamma[i];
@@ -863,11 +866,11 @@ int main() {{
   if (pass) {{
     vx_printf("full_inference PASSED (max_diff=%d.%04d)\\n",
               (int)max_diff, (int)((max_diff - (int)max_diff) * 10000));
-    return 0;
+    return 0x5A;  /* hardware expects 0x5A for VX_EXIT_SEEN */
   }} else {{
     vx_printf("full_inference FAILED (max_diff=%d.%04d)\\n",
               (int)max_diff, (int)((max_diff - (int)max_diff) * 10000));
-    return 1;
+    return 0xFF;  /* non-0x5A signals failure to hardware */
   }}
 }}
 """
@@ -1074,7 +1077,7 @@ int main() {{
   /* ==================================================================
    * Stage 1: Embedding
    * ================================================================== */
-  float x_cur[S * D];
+  static float x_cur[S * D];
   embedding(input_ids, tok_embed, pos_embed, x_cur);
 
   vx_printf("embedding done\\n");
@@ -1083,15 +1086,15 @@ int main() {{
    * Stage 2: Transformer blocks (x {N} layers)
    * ================================================================== */
 
-  /* Scratch buffers (on stack) */
-  float tb_x_out[S * D];
-  float tb_x_ln[S * D];
-  float tb_q[S * D], tb_k[S * D], tb_v[S * D];
-  float tb_score[S * S], tb_prob[S * S];
-  float tb_attn[S * D], tb_attn_out[S * D];
-  float tb_x_ln2[S * D], tb_hidden[S * D_FF];
-  float tb_ln_mean[S], tb_ln_var[S];
-  float tb_sm_max[S], tb_sm_sum[S];
+  /* Scratch buffers -- static (BSS -> DDR) to avoid 8 KB stack overflow */
+  static float tb_x_out[S * D];
+  static float tb_x_ln[S * D];
+  static float tb_q[S * D], tb_k[S * D], tb_v[S * D];
+  static float tb_score[S * S], tb_prob[S * S];
+  static float tb_attn[S * D], tb_attn_out[S * D];
+  static float tb_x_ln2[S * D], tb_hidden[S * D_FF];
+  static float tb_ln_mean[S], tb_ln_var[S];
+  static float tb_sm_max[S], tb_sm_sum[S];
 
   for (int layer = 0; layer < {N}; layer++) {{
     /* Compute weight pointers for this layer (directly in DDR, no copy) */
@@ -1143,9 +1146,9 @@ int main() {{
   /* ==================================================================
    * Stage 3: LM Head
    * ================================================================== */
-  float logits[S * V];
-  float lm_ln_out[S * D];
-  float lm_ln_mean[S], lm_ln_var[S];
+  static float logits[S * V];
+  static float lm_ln_out[S * D];
+  static float lm_ln_mean[S], lm_ln_var[S];
 
   memset(logits, 0, sizeof(logits));
   memset(lm_ln_out, 0, sizeof(lm_ln_out));
@@ -1161,7 +1164,7 @@ int main() {{
   memcpy(output, logits, sizeof(logits));
 
   vx_printf("KERNEL_DONE\\n");
-  return 0;
+  return 0x5A;  /* hardware expects 0x5A for VX_EXIT_SEEN */
 }}
 """
 
