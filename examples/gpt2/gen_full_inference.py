@@ -1163,7 +1163,12 @@ int main() {{
   /* Copy logits to DDR output buffer for host to read back */
   memcpy(output, logits, sizeof(logits));
 
-  vx_printf("KERNEL_DONE\\n");
+  vx_printf("PASSED\\n");
+
+  /* Busy-wait to let VIO poll see PASSED before exit kills the core.
+   * At 50 MHz this is ~20ms, enough for at least one VIO poll cycle. */
+  for (volatile int _delay = 0; _delay < 1000000; _delay++) {{}}
+
   return 0x5A;  /* hardware expects 0x5A for VX_EXIT_SEEN */
 }}
 """
