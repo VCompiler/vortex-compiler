@@ -1,0 +1,704 @@
+#!/usr/bin/env python3
+"""Host-side driver: 上板执行 Guppy，并回读下一个 token。"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import math
+import random
+import re
+import shutil
+import struct
+import subprocess
+import time
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError
+from urllib.request import ProxyHandler, Request, build_opener
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text())
+
+
+def format_prompt(messages: list[dict[str, Any]]) -> str:
+    parts = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content") or ""
+        parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+    parts.append("<|im_start|>assistant\n")
+    return "\n".join(parts)
+
+
+def safe_name(value: str) -> str:
+    text = re.sub(r"[^0-9A-Za-z_]+", "_", value.strip())
+    return text.strip("_") or "run"
+
+
+def find_tool(name: str, candidates: list[Path]) -> str:
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    found = shutil.which(name)
+    if found:
+        return found
+    raise FileNotFoundError(f"未找到工具: {name}")
+
+
+def parse_symbols(elf_path: Path, llvm_nm: str) -> dict[str, int]:
+    result = subprocess.run(
+        [llvm_nm, "--defined-only", str(elf_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    symbols: dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 3:
+            continue
+        try:
+            addr = int(parts[0], 16)
+        except ValueError:
+            continue
+        symbols[parts[-1]] = addr
+    return symbols
+
+
+def int_to_word(value: int) -> str:
+    return f"{value & 0xFFFFFFFF:08X}"
+
+
+def ints_to_words(values: list[int]) -> list[str]:
+    return [int_to_word(value) for value in values]
+
+
+def words_to_ints(words: list[str]) -> list[int]:
+    return [int(word.strip(), 16) for word in words if word.strip()]
+
+
+def words_to_f32(words: list[str]) -> list[float]:
+    values = []
+    for word in words:
+        clean = word.strip()
+        if not clean:
+            continue
+        raw = int(clean, 16).to_bytes(4, byteorder="big", signed=False)
+        values.append(struct.unpack(">f", raw)[0])
+    return values
+
+
+class JsonHttpClient:
+    def __init__(self) -> None:
+        self._opener = build_opener(ProxyHandler({}))
+
+    def get_json(self, url: str) -> dict[str, Any]:
+        with self._opener.open(url) as response:
+            return json.load(response)
+
+    def post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(payload).encode("utf-8")
+        request = Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self._opener.open(request) as response:
+            return json.load(response)
+
+
+def fetch_log_content(client: JsonHttpClient, service_url: str, job_id: str, name: str) -> str:
+    payload = client.get_json(f"{service_url}/jobs/{job_id}/logs/{name}")
+    return payload.get("content", "")
+
+
+def try_fetch_log_content(
+    client: JsonHttpClient, service_url: str, job_id: str, name: str
+) -> str | None:
+    try:
+        return fetch_log_content(client, service_url, job_id, name)
+    except HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+
+
+def fetch_log_list(client: JsonHttpClient, service_url: str, job_id: str) -> list[str]:
+    payload = client.get_json(f"{service_url}/jobs/{job_id}/logs")
+    files = payload.get("files", [])
+    return files if isinstance(files, list) else []
+
+
+def fetch_status_file(client: JsonHttpClient, service_url: str, job_id: str) -> dict[str, Any] | None:
+    try:
+        content = fetch_log_content(client, service_url, job_id, "status.json")
+    except HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    if not content:
+        return None
+    return json.loads(content)
+
+
+def poll_job(
+    client: JsonHttpClient,
+    service_url: str,
+    job_id: str,
+    timeout_sec: int,
+    poll_interval_sec: float,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout_sec
+    last_status = "unknown"
+    while time.time() < deadline:
+        status_payload = fetch_status_file(client, service_url, job_id)
+        if status_payload is None:
+            time.sleep(poll_interval_sec)
+            continue
+        last_status = status_payload.get("status", last_status)
+        if last_status in {"succeeded", "failed", "cancelled"}:
+            return status_payload
+        time.sleep(poll_interval_sec)
+    raise TimeoutError(f"等待 job {job_id} 超时，最后状态: {last_status}")
+
+
+def extract_stdout_text(stdout_log: str) -> str:
+    begin = "STDOUT_TEXT_BEGIN\n"
+    end = "\nSTDOUT_TEXT_END"
+    start = stdout_log.find(begin)
+    if start < 0:
+        return ""
+    start += len(begin)
+    stop = stdout_log.find(end, start)
+    if stop < 0:
+        return stdout_log[start:].strip()
+    return stdout_log[start:stop].strip()
+
+
+def build_messages(args: argparse.Namespace, bundle_prompt: dict[str, Any]) -> list[dict[str, Any]]:
+    if args.messages_json:
+        payload = json.loads(Path(args.messages_json).expanduser().resolve().read_text())
+        if not isinstance(payload, list) or not payload:
+            raise ValueError("--messages-json 必须是非空消息列表")
+        return payload
+    if args.prompt_text is not None:
+        return [{"role": "user", "content": args.prompt_text}]
+    messages = bundle_prompt.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ValueError("bundle prompt.json 缺少 messages，且未指定 --prompt-text/--messages-json")
+    return messages
+
+
+def pick_next_token_from_logits(
+    *,
+    logits: list[float],
+    tokenizer: Any,
+    decode_mode: str,
+    temperature: float,
+    sample_top_k: int,
+    rng: random.Random,
+) -> tuple[int, list[dict[str, Any]]]:
+    ranked = sorted(enumerate(logits), key=lambda item: item[1], reverse=True)
+    preview = [
+        {
+            "token_id": token_id,
+            "logit": float(logit),
+            "text": tokenizer.decode([token_id]),
+        }
+        for token_id, logit in ranked[: max(1, sample_top_k)]
+    ]
+    if decode_mode == "greedy":
+        token_id = preview[0]["token_id"]
+        return int(token_id), preview
+
+    top_candidates = ranked[: max(1, sample_top_k)]
+    scaled = [candidate[1] / temperature for candidate in top_candidates]
+    max_scaled = max(scaled)
+    weights = [math.exp(value - max_scaled) for value in scaled]
+    total = sum(weights)
+    if total <= 0.0:
+        token_id = top_candidates[0][0]
+        return int(token_id), preview
+    threshold = rng.random() * total
+    acc = 0.0
+    for (token_id, _), weight in zip(top_candidates, weights):
+        acc += weight
+        if acc >= threshold:
+            return int(token_id), preview
+    return int(top_candidates[-1][0]), preview
+
+
+def run_generation_step(
+    *,
+    client: JsonHttpClient,
+    tokenizer: Any,
+    service_url: str,
+    elf_path: Path,
+    stage_dir: Path,
+    request_base: dict[str, Any],
+    symbols: dict[str, int],
+    seq_len: int,
+    pad_id: int,
+    vocab_size: int,
+    token_ids: list[int],
+    run_name: str,
+    step_index: int,
+    timeout_sec: int,
+    poll_interval_sec: float,
+    read_logits: bool,
+    top_k: int,
+    decode_mode: str,
+    temperature: float,
+    sample_top_k: int,
+    rng: random.Random,
+    resident_job_id: str | None,
+    reload_all_kernel_segments: bool,
+) -> dict[str, Any]:
+    padded_ids = token_ids + [pad_id] * (seq_len - len(token_ids))
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "name": f"{run_name}_s{step_index:02d}",
+        "expect_exit_word": "0x00000000",
+        "segments": [
+            {
+                "name": "input_token_ids",
+                "addr": f"0x{symbols['guppy_input_token_ids']:08X}",
+                "byte_len": f"0x{seq_len * 4:X}",
+                "mem_words": ints_to_words(padded_ids),
+            },
+            {
+                "name": "runtime_prompt_length",
+                "addr": f"0x{symbols['guppy_runtime_prompt_length']:08X}",
+                "byte_len": "0x4",
+                "mem_words": [int_to_word(len(token_ids))],
+            },
+            {
+                "name": "runtime_expect_golden",
+                "addr": f"0x{symbols['guppy_runtime_expect_golden']:08X}",
+                "byte_len": "0x4",
+                "mem_words": [int_to_word(0)],
+            },
+        ],
+        "outputs": [
+            {
+                "name": "argmax",
+                "addr": f"0x{symbols['guppy_output_last_token_argmax']:08X}",
+                "words": 1,
+            }
+        ],
+    }
+    if read_logits:
+        manifest["outputs"].append(
+            {
+                "name": "last_token_logits",
+                "addr": f"0x{symbols['guppy_output_last_token_logits']:08X}",
+                "words": vocab_size,
+            }
+        )
+
+    full_request_payload = {
+        **request_base,
+        "kernel_elf_name": elf_path.name,
+        "kernel_elf_base64": base64.b64encode(elf_path.read_bytes()).decode("ascii"),
+        "manifest": manifest,
+    }
+    resident_request_payload = {
+        "resident_job_id": resident_job_id,
+        "manifest": manifest,
+        "board_scripts_dir": request_base["board_scripts_dir"],
+        "ltx_path": request_base["ltx_path"],
+        "device_index": request_base["device_index"],
+        "debug_jtag_freq_hz": request_base["debug_jtag_freq_hz"],
+        "hw_server_url": request_base["hw_server_url"],
+        "hw_server_bind": request_base["hw_server_bind"],
+        "dump_stdout": request_base["dump_stdout"],
+        "persistent_vivado_session": request_base["persistent_vivado_session"],
+        "stdout_max_chars": request_base["stdout_max_chars"],
+        "timeout_sec": request_base["timeout_sec"],
+    }
+    if "status_poll_count" in request_base:
+        resident_request_payload["status_poll_count"] = request_base["status_poll_count"]
+    if "status_poll_ms" in request_base:
+        resident_request_payload["status_poll_ms"] = request_base["status_poll_ms"]
+    if reload_all_kernel_segments:
+        resident_request_payload["reload_all_kernel_segments"] = True
+
+    request_payload = resident_request_payload if resident_job_id else full_request_payload
+    endpoint = "run-resident-manifest" if resident_job_id else "run-manifest"
+
+    step_request_path = stage_dir / f"chat_step_{step_index:02d}_request.json"
+    step_request_path.write_text(
+        json.dumps(request_payload, indent=2, ensure_ascii=False) + "\n"
+    )
+
+    used_resident = resident_job_id is not None
+    try:
+        submission = client.post_json(f"{service_url}/jobs/{endpoint}", request_payload)
+    except HTTPError as exc:
+        if not used_resident or exc.code not in {400, 404}:
+            raise
+        endpoint = "run-manifest"
+        used_resident = False
+        request_payload = full_request_payload
+        step_request_path.write_text(
+            json.dumps(request_payload, indent=2, ensure_ascii=False) + "\n"
+        )
+        submission = client.post_json(f"{service_url}/jobs/{endpoint}", request_payload)
+    job_id = submission["job_id"]
+    (stage_dir / f"chat_step_{step_index:02d}_job_id.txt").write_text(job_id + "\n")
+    print(f"step {step_index}: job_id={job_id}", flush=True)
+
+    status_payload = poll_job(
+        client,
+        service_url,
+        job_id,
+        timeout_sec=timeout_sec,
+        poll_interval_sec=poll_interval_sec,
+    )
+
+    available_files = fetch_log_list(client, service_url, job_id)
+    stdout_log = try_fetch_log_content(client, service_url, job_id, "stdout.log") or ""
+    stdout_text = extract_stdout_text(stdout_log)
+    summary_text = try_fetch_log_content(client, service_url, job_id, "summary.json")
+    summary = json.loads(summary_text) if summary_text else {}
+
+    argmax_mem = try_fetch_log_content(
+        client, service_url, job_id, "artifacts/argmax_actual.mem"
+    )
+    argmax_words = argmax_mem.splitlines() if argmax_mem else []
+    if not argmax_words:
+        raise RuntimeError(
+            "未回读到 argmax_actual.mem; "
+            f"step={step_index} status={status_payload.get('status')} files={available_files}"
+        )
+    board_argmax_id = words_to_ints(argmax_words)[0]
+    next_token_id = board_argmax_id
+    next_token_text = tokenizer.decode([next_token_id])
+
+    top_k_payload: list[dict[str, Any]] = []
+    if read_logits:
+        logits_mem = try_fetch_log_content(
+            client, service_url, job_id, "artifacts/last_token_logits_actual.mem"
+        )
+        logits_words = logits_mem.splitlines() if logits_mem else []
+        logits = words_to_f32(logits_words)
+        next_token_id, top_k_payload = pick_next_token_from_logits(
+            logits=logits,
+            tokenizer=tokenizer,
+            decode_mode=decode_mode,
+            temperature=temperature,
+            sample_top_k=sample_top_k,
+            rng=rng,
+        )
+        next_token_text = tokenizer.decode([next_token_id])
+
+    step_result = {
+        "step_index": step_index,
+        "job_id": job_id,
+        "status": status_payload.get("status"),
+        "exit_code": status_payload.get("exit_code"),
+        "input_ids": list(token_ids),
+        "padded_input_ids": padded_ids,
+        "board_argmax_id": board_argmax_id,
+        "next_token_id": next_token_id,
+        "next_token_text": next_token_text,
+        "stdout_text": stdout_text,
+        "metadata": status_payload.get("metadata", {}),
+        "summary": summary,
+        "top_k": top_k_payload,
+        "available_files": available_files,
+        "endpoint": endpoint,
+        "used_resident": used_resident,
+        "resident_job_id": resident_job_id,
+    }
+    step_result_path = stage_dir / f"chat_step_{step_index:02d}_result.json"
+    step_result_path.write_text(
+        json.dumps(step_result, indent=2, ensure_ascii=False) + "\n"
+    )
+    return step_result
+
+
+def update_resident_job_id(
+    current_resident_job_id: str | None,
+    step_result: dict[str, Any],
+    *,
+    reuse_resident: bool,
+) -> str | None:
+    if not reuse_resident:
+        return None
+    if step_result.get("used_resident") is True:
+        return current_resident_job_id
+    if step_result.get("status") != "succeeded":
+        return None
+    return str(step_result["job_id"])
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run Guppy next-token inference on the FPGA board.")
+    parser.add_argument("--bundle-dir", default="build/guppy/export", help="阶段 B bundle 目录")
+    parser.add_argument(
+        "--stage-dir",
+        default="build/guppy/full_inference_seq10_l1",
+        help="阶段 C 产物目录",
+    )
+    parser.add_argument("--prompt-text", default=None, help="快捷输入：单条 user prompt")
+    parser.add_argument("--messages-json", default=None, help="消息列表 JSON，优先级高于 --prompt-text")
+    parser.add_argument("--service-url", default="http://100.125.4.76:18001", help="remote_vivado_service URL")
+    parser.add_argument(
+        "--bit-path",
+        default="E:/fpga/repo/vx_xc7k480t_jtag_axi_20260405/jtag_axi_build/jtag_axi_build.runs/impl_1/xc7k480t_vortex_board_top.bit",
+        help="Windows 侧 bit 路径",
+    )
+    parser.add_argument(
+        "--ltx-path",
+        default="E:/fpga/repo/vx_xc7k480t_jtag_axi_20260405/jtag_axi_build/jtag_axi_build.runs/impl_1/xc7k480t_vortex_board_top.ltx",
+        help="Windows 侧 ltx 路径",
+    )
+    parser.add_argument("--board-scripts-dir", default="E:/fpga/out", help="Windows 侧板级脚本目录")
+    parser.add_argument("--hw-server-url", default="TCP:localhost:3121", help="hw_server URL")
+    parser.add_argument("--hw-server-bind", default="TCP:localhost:3121", help="hw_server bind")
+    parser.add_argument("--device-index", type=int, default=0, help="板卡索引")
+    parser.add_argument("--program-jtag-freq-hz", type=int, default=10_000_000, help="下载 bit 的 JTAG 频率")
+    parser.add_argument("--debug-jtag-freq-hz", type=int, default=10_000_000, help="load/run 的 JTAG 频率")
+    parser.add_argument("--timeout-sec", type=int, default=3600, help="run-manifest timeout")
+    parser.add_argument("--poll-interval-sec", type=float, default=5.0, help="轮询间隔")
+    parser.add_argument("--stdout-max-chars", type=int, default=4096, help="stdout drain 上限")
+    parser.add_argument("--status-poll-count", type=int, default=None, help="板端 run 轮询次数")
+    parser.add_argument("--status-poll-ms", type=int, default=None, help="板端 run 轮询间隔(ms)")
+    parser.add_argument(
+        "--reuse-resident",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="首个 token 用 run-manifest，后续 token 复用 resident session",
+    )
+    parser.add_argument(
+        "--persistent-vivado-session",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="是否复用常驻 Vivado 控制会话；当前默认关闭以避免已知不稳定问题",
+    )
+    parser.add_argument(
+        "--resident-reload-all-kernel-segments",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="resident rerun 时重载全部 kernel 段；仅建议用于小 kernel debug",
+    )
+    parser.add_argument("--read-logits", action="store_true", help="额外回读完整 last-token logits")
+    parser.add_argument("--top-k", type=int, default=8, help="打印 top-k")
+    parser.add_argument("--max-new-tokens", type=int, default=1, help="最多生成多少个新 token")
+    parser.add_argument(
+        "--decode-mode",
+        choices=["greedy", "sample"],
+        default="greedy",
+        help="host 侧 decode 策略",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="sample 模式的温度",
+    )
+    parser.add_argument(
+        "--sample-top-k",
+        type=int,
+        default=16,
+        help="sample 模式的 top-k",
+    )
+    parser.add_argument("--seed", type=int, default=1234, help="sample 模式随机种子")
+    parser.add_argument("--llvm-nm", default=None, help="显式指定 llvm-nm")
+    args = parser.parse_args()
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle_dir = Path(args.bundle_dir).expanduser().resolve()
+    stage_dir = Path(args.stage_dir).expanduser().resolve()
+    out_dir = stage_dir / "out"
+    elf_path = out_dir / "full_inference.elf"
+    bundle_prompt = load_json(bundle_dir / "prompt.json")
+    bundle_config = load_json(bundle_dir / "model_config.json")
+    stage_manifest = load_json(stage_dir / "full_inference_manifest.json")
+    if not elf_path.is_file():
+        raise FileNotFoundError(f"未找到 ELF: {elf_path}")
+
+    try:
+        from tokenizers import Tokenizer
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("需要安装 tokenizers") from exc
+
+    tokenizer = Tokenizer.from_file(str(bundle_dir / "tokenizer.json"))
+    messages = build_messages(args, bundle_prompt)
+    prompt = format_prompt(messages)
+    prompt_ids = tokenizer.encode(prompt).ids
+
+    cfg = bundle_config["normalized_config"]
+    seq_len = int(stage_manifest["sequence_length"])
+    vocab_size = int(cfg["vocab_size"])
+    pad_id = int(cfg["pad_id"])
+    eos_id = int(cfg["eos_id"])
+    if len(prompt_ids) > seq_len:
+        raise ValueError(
+            f"prompt token 长度 {len(prompt_ids)} 超过当前静态 sequence_length={seq_len}"
+        )
+    if args.max_new_tokens <= 0:
+        raise ValueError("--max-new-tokens 必须大于 0")
+    if args.temperature <= 0.0:
+        raise ValueError("--temperature 必须大于 0")
+    if args.sample_top_k <= 0:
+        raise ValueError("--sample-top-k 必须大于 0")
+    if args.decode_mode == "sample":
+        args.read_logits = True
+
+    llvm_nm = args.llvm_nm or find_tool(
+        "llvm-nm",
+        [
+            repo_root / "third_party" / "llvm-vortex-build" / "bin" / "llvm-nm",
+            Path("/usr/lib/llvm-18/bin/llvm-nm"),
+        ],
+    )
+    symbols = parse_symbols(elf_path, llvm_nm)
+    required = [
+        "guppy_input_token_ids",
+        "guppy_runtime_prompt_length",
+        "guppy_runtime_expect_golden",
+        "guppy_output_last_token_argmax",
+    ]
+    if args.read_logits:
+        required.append("guppy_output_last_token_logits")
+    missing = [name for name in required if name not in symbols]
+    if missing:
+        raise KeyError(f"ELF 中缺少符号: {', '.join(missing)}")
+
+    prompt_hash = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:8]
+    first_msg = messages[0].get("content", "prompt") if messages else "prompt"
+    run_name = f"guppy_chat_{safe_name(first_msg)}_{prompt_hash}"
+    request_base = {
+        "bit_path": args.bit_path,
+        "ltx_path": args.ltx_path,
+        "board_scripts_dir": args.board_scripts_dir,
+        "device_index": args.device_index,
+        "program_jtag_freq_hz": args.program_jtag_freq_hz,
+        "debug_jtag_freq_hz": args.debug_jtag_freq_hz,
+        "hw_server_url": args.hw_server_url,
+        "hw_server_bind": args.hw_server_bind,
+        "verify": False,
+        "dump_stdout": True,
+        "persistent_vivado_session": args.persistent_vivado_session,
+        "stdout_max_chars": args.stdout_max_chars,
+        "timeout_sec": args.timeout_sec,
+    }
+    if args.status_poll_count is not None:
+        request_base["status_poll_count"] = args.status_poll_count
+    if args.status_poll_ms is not None:
+        request_base["status_poll_ms"] = args.status_poll_ms
+
+    client = JsonHttpClient()
+    rng = random.Random(args.seed)
+    current_ids = list(prompt_ids)
+    generated_ids: list[int] = []
+    step_results: list[dict[str, Any]] = []
+    stop_reason = "max_new_tokens"
+    resident_job_id: str | None = None
+
+    for step_index in range(args.max_new_tokens):
+        if len(current_ids) >= seq_len:
+            stop_reason = "sequence_full"
+            break
+        step_result = run_generation_step(
+            client=client,
+            tokenizer=tokenizer,
+            service_url=args.service_url,
+            elf_path=elf_path,
+            stage_dir=stage_dir,
+            request_base=request_base,
+            symbols=symbols,
+            seq_len=seq_len,
+            pad_id=pad_id,
+            vocab_size=vocab_size,
+            token_ids=current_ids,
+            run_name=run_name,
+            step_index=step_index,
+            timeout_sec=args.timeout_sec,
+            poll_interval_sec=args.poll_interval_sec,
+            read_logits=args.read_logits,
+            top_k=args.top_k,
+            decode_mode=args.decode_mode,
+            temperature=args.temperature,
+            sample_top_k=args.sample_top_k,
+            rng=rng,
+            resident_job_id=resident_job_id if args.reuse_resident else None,
+            reload_all_kernel_segments=args.resident_reload_all_kernel_segments,
+        )
+        step_results.append(step_result)
+        resident_job_id = update_resident_job_id(
+            resident_job_id,
+            step_result,
+            reuse_resident=args.reuse_resident,
+        )
+        next_token_id = int(step_result["next_token_id"])
+        next_token_text = str(step_result["next_token_text"])
+        generated_ids.append(next_token_id)
+        current_ids.append(next_token_id)
+        print(
+            f"step {step_index}: next_token_id={next_token_id} next_token_text={next_token_text!r}",
+            flush=True,
+        )
+        if next_token_id == eos_id:
+            stop_reason = "eos"
+            break
+        if len(current_ids) >= seq_len:
+            stop_reason = "sequence_full"
+            break
+
+    generated_text = tokenizer.decode(generated_ids) if generated_ids else ""
+    final_job_id = step_results[-1]["job_id"] if step_results else None
+    final_status = step_results[-1]["status"] if step_results else "not_run"
+    final_exit_code = step_results[-1]["exit_code"] if step_results else None
+
+    result = {
+        "job_id": final_job_id,
+        "status": final_status,
+        "exit_code": final_exit_code,
+        "prompt": prompt,
+        "input_ids": prompt_ids,
+        "generated_ids": generated_ids,
+        "generated_text": generated_text,
+        "full_ids": current_ids,
+        "stop_reason": stop_reason,
+        "sequence_length_limit": seq_len,
+        "decode_mode": args.decode_mode,
+        "temperature": args.temperature,
+        "sample_top_k": args.sample_top_k,
+        "steps": step_results,
+    }
+    result_path = stage_dir / "chat_last_result.json"
+    result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+
+    final_request_path = stage_dir / "chat_last_request.json"
+    if step_results:
+        last_step_request = stage_dir / f"chat_step_{len(step_results) - 1:02d}_request.json"
+        if last_step_request.is_file():
+            final_request_path.write_text(last_step_request.read_text())
+        (stage_dir / "chat_last_job_id.txt").write_text(str(final_job_id) + "\n")
+
+    print(f"job_id: {final_job_id}")
+    print(f"status: {final_status}")
+    print(f"prompt_token_count: {len(prompt_ids)}")
+    print(f"generated_token_count: {len(generated_ids)}")
+    print(f"generated_ids: {generated_ids}")
+    print(f"generated_text: {generated_text!r}")
+    print(f"stop_reason: {stop_reason}")
+    if step_results:
+        last_stdout = step_results[-1].get("stdout_text") or ""
+        if last_stdout:
+            print(f"stdout: {last_stdout}")
+    print(f"saved request: {final_request_path}")
+    print(f"saved result: {result_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,5 +1,9 @@
 /build/
 /build-*/
+/.venv-guppy-stagea/
+/ramulator.stats.log
+/trace/
+/third_party/llvm-vortex-build/
 
 # Generated configuration files.
 /CMakeCache.txt
