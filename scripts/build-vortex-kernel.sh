@@ -91,6 +91,18 @@ sanitize_llvm_ir_for_vortex_clang() {
   mv "${tmp}" "${path}"
 }
 
+sanitize_llvm_dialect_mlir_for_translate() {
+  local path="$1"
+  local tmp="${path}.sanitized"
+  sed -E \
+    -e 's/llvm\.getelementptr inbounds\|nuw /llvm.getelementptr inbounds /g' \
+    -e 's/llvm\.getelementptr inbounds\|nusw /llvm.getelementptr inbounds /g' \
+    -e 's/llvm\.getelementptr inbounds\|nuw\|nusw /llvm.getelementptr inbounds /g' \
+    -e 's/llvm\.getelementptr inbounds\|nusw\|nuw /llvm.getelementptr inbounds /g' \
+    "${path}" > "${tmp}"
+  mv "${tmp}" "${path}"
+}
+
 resolve_abs_path() {
   local path="$1"
   if [[ -d "${path}" ]]; then
@@ -287,7 +299,7 @@ if [[ -n "${LLVM_VORTEX_ROOT}" ]]; then
 fi
 
 VX_OPT_BIN_DIR="${REPO_ROOT}/build/bin"
-if [[ -d "${REPO_ROOT}/build-thirdparty-llvm/bin" ]]; then
+if [[ ! -x "${VX_OPT_BIN_DIR}/vx-opt" && -d "${REPO_ROOT}/build-thirdparty-llvm/bin" ]]; then
   VX_OPT_BIN_DIR="${REPO_ROOT}/build-thirdparty-llvm/bin"
 fi
 
@@ -427,6 +439,7 @@ else
   run_cmd "${vx_opt_cmd[@]}"
 fi
 
+sanitize_llvm_dialect_mlir_for_translate "${LOWERED_MLIR}"
 run_cmd "${MLIR_TRANSLATE_BIN}" -mlir-to-llvmir "${LOWERED_MLIR}" -o "${LLVM_IR}"
 sanitize_llvm_ir_for_vortex_clang "${LLVM_IR}"
 run_cmd "${CLANG_BIN}" "${TARGET_FLAGS[@]}" "${COMMON_COMPILE_FLAGS[@]}" -S -x ir "${LLVM_IR}" -o "${ASM}"
