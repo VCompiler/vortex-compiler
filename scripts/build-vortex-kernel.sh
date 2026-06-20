@@ -15,11 +15,14 @@ usage() {
     [--skip-vx-opt] \
     [--allow-unregistered-dialect] \
     [--extra-source wrapper.c] ... \
+    [--board-xdma-abi] \
     [--build-runtime] \
     [--xlen 32|64] \
     [--startup-addr 0x80000000] \
     [--vx-opt /path/to/vx-opt] \
     [--mlir-translate /path/to/mlir-translate] \
+    [--llc /path/to/llc] \
+    [--codegen-backend clang|llc] \
     [--clang /path/to/clang] \
     [--clangxx /path/to/clang++] \
     [--objcopy /path/to/llvm-objcopy] \
@@ -35,10 +38,12 @@ usage() {
        .llvm.mlir / .ll / .s / .o / .elf / .bin / .dump
   4. 若要自己控制 lowering，可传 --pass-pipeline
   5. 若输入已经是 LLVM dialect MLIR，可传 --skip-vx-opt
+  6. 若目标是 local-XDMA board runner，可传 --board-xdma-abi 自动链接标准 entry/exit shim
 
 环境变量:
   VX_OPT_BIN
   MLIR_TRANSLATE_BIN
+  LLC_BIN
   CLANG_BIN
   CLANGXX_BIN
   LLVM_OBJCOPY
@@ -49,6 +54,7 @@ usage() {
   RISCV_SYSROOT
   LIBC_VORTEX
   LIBCRT_VORTEX
+  VORTEX_RUNTIME_CFLAGS
 EOF
 }
 
@@ -103,6 +109,44 @@ sanitize_llvm_dialect_mlir_for_translate() {
   mv "${tmp}" "${path}"
 }
 
+workaround_large_riscv_sp_offsets() {
+  local path="$1"
+  local tmp="${path}.sp-offset-workaround"
+  python3 - "${path}" "${tmp}" <<'PY'
+import re
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+pattern = re.compile(r"^(\s*)(lw|sw|flw|fsw)\s+([^,\s]+),\s*([0-9]+)\(sp\)(.*)$")
+
+with open(src, "r", encoding="utf-8") as f:
+    lines = f.readlines()
+
+out = []
+for line in lines:
+    m = pattern.match(line.rstrip("\n"))
+    if not m:
+        out.append(line)
+        continue
+
+    indent, op, reg, offset_text, suffix = m.groups()
+    offset = int(offset_text, 10)
+    if offset < 128:
+        out.append(line)
+        continue
+
+    scratch = "t6"
+    if op in ("sw", "fsw") and reg == scratch:
+        scratch = "t5"
+    out.append(f"{indent}addi\t{scratch}, sp, {offset}\n")
+    out.append(f"{indent}{op}\t{reg}, 0({scratch}){suffix}\n")
+
+with open(dst, "w", encoding="utf-8") as f:
+    f.writelines(out)
+PY
+  mv "${tmp}" "${path}"
+}
+
 resolve_abs_path() {
   local path="$1"
   if [[ -d "${path}" ]]; then
@@ -143,12 +187,62 @@ find_tool() {
   die "未找到工具 ${name}"
 }
 
+find_tool_optional() {
+  local explicit="$1"
+  local env_path="$2"
+  local bin_dir="$3"
+  local name="$4"
+
+  if [[ -n "${explicit}" ]]; then
+    printf '%s\n' "${explicit}"
+    return
+  fi
+
+  if [[ -n "${env_path}" ]]; then
+    printf '%s\n' "${env_path}"
+    return
+  fi
+
+  if [[ -n "${bin_dir}" && -x "${bin_dir}/${name}" ]]; then
+    printf '%s\n' "${bin_dir}/${name}"
+    return
+  fi
+
+  if command -v "${name}" >/dev/null 2>&1; then
+    command -v "${name}"
+    return
+  fi
+}
+
+find_local_tool_optional() {
+  local explicit="$1"
+  local env_path="$2"
+  local bin_dir="$3"
+  local name="$4"
+
+  if [[ -n "${explicit}" ]]; then
+    printf '%s\n' "${explicit}"
+    return
+  fi
+
+  if [[ -n "${env_path}" ]]; then
+    printf '%s\n' "${env_path}"
+    return
+  fi
+
+  if [[ -n "${bin_dir}" && -x "${bin_dir}/${name}" ]]; then
+    printf '%s\n' "${bin_dir}/${name}"
+    return
+  fi
+}
+
 INPUT=""
 OUTPUT_DIR=""
 PASS_PIPELINE="builtin.module(vortex-mvp-backend-pipeline)"
 SKIP_VX_OPT=0
 ALLOW_UNREGISTERED=0
 BUILD_RUNTIME=0
+BOARD_XDMA_ABI=0
 VERBOSE=0
 XLEN=32
 STARTUP_ADDR=0x80000000
@@ -156,10 +250,12 @@ PLATFORM_ROOT=""
 
 VX_OPT_EXPLICIT=""
 MLIR_TRANSLATE_EXPLICIT=""
+LLC_EXPLICIT=""
 CLANG_EXPLICIT=""
 CLANGXX_EXPLICIT=""
 OBJCOPY_EXPLICIT=""
 OBJDUMP_EXPLICIT=""
+CODEGEN_BACKEND_REQUEST=""
 
 declare -a EXTRA_SOURCES=()
 declare -a CLANG_EXTRA_ARGS=()
@@ -190,6 +286,10 @@ while [[ $# -gt 0 ]]; do
       EXTRA_SOURCES+=("$2")
       shift 2
       ;;
+    --board-xdma-abi)
+      BOARD_XDMA_ABI=1
+      shift
+      ;;
     --build-runtime)
       BUILD_RUNTIME=1
       shift
@@ -212,6 +312,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --mlir-translate)
       MLIR_TRANSLATE_EXPLICIT="$2"
+      shift 2
+      ;;
+    --llc)
+      LLC_EXPLICIT="$2"
+      shift 2
+      ;;
+    --codegen-backend)
+      CODEGEN_BACKEND_REQUEST="$2"
       shift 2
       ;;
     --clang)
@@ -265,6 +373,10 @@ INPUT="$(resolve_abs_path "${INPUT}")"
 mkdir -p "${OUTPUT_DIR}"
 OUTPUT_DIR="$(resolve_abs_path "${OUTPUT_DIR}")"
 
+if [[ ${BOARD_XDMA_ABI} -eq 1 ]]; then
+  EXTRA_SOURCES+=("${REPO_ROOT}/runtime/board_xdma_abi.c")
+fi
+
 for source in "${EXTRA_SOURCES[@]}"; do
   source="$(resolve_abs_path "${source}")"
   [[ -f "${source}" ]] || die "额外源码不存在: ${source}"
@@ -305,9 +417,35 @@ fi
 
 VX_OPT_BIN="$(find_tool "${VX_OPT_EXPLICIT}" "${VX_OPT_BIN:-}" "${VX_OPT_BIN_DIR}" "vx-opt")"
 MLIR_TRANSLATE_BIN="$(find_tool "${MLIR_TRANSLATE_EXPLICIT}" "${MLIR_TRANSLATE_BIN:-}" "${TARGET_BIN_DIR}" "mlir-translate")"
-CLANG_BIN="$(find_tool "${CLANG_EXPLICIT}" "${CLANG_BIN:-}" "${TARGET_BIN_DIR}" "clang")"
+LLC_BIN="$(find_tool_optional "${LLC_EXPLICIT}" "${LLC_BIN:-}" "${TARGET_BIN_DIR}" "llc")"
+CLANG_BIN="$(find_local_tool_optional "${CLANG_EXPLICIT}" "${CLANG_BIN:-}" "${TARGET_BIN_DIR}" "clang")"
 OBJCOPY_BIN="$(find_tool "${OBJCOPY_EXPLICIT}" "${LLVM_OBJCOPY:-}" "${TARGET_BIN_DIR}" "llvm-objcopy")"
 OBJDUMP_BIN="$(find_tool "${OBJDUMP_EXPLICIT}" "${LLVM_OBJDUMP:-}" "${TARGET_BIN_DIR}" "llvm-objdump")"
+
+CODEGEN_BACKEND=""
+if [[ -n "${CODEGEN_BACKEND_REQUEST}" ]]; then
+  CODEGEN_BACKEND="${CODEGEN_BACKEND_REQUEST}"
+else
+  if [[ -n "${CLANG_BIN}" ]]; then
+    CODEGEN_BACKEND="clang"
+  elif [[ -n "${LLC_BIN}" ]]; then
+    CODEGEN_BACKEND="llc"
+  else
+    die "未找到可用 codegen backend；请提供本地 clang 或 llc"
+  fi
+fi
+
+case "${CODEGEN_BACKEND}" in
+  clang)
+    [[ -n "${CLANG_BIN}" ]] || die "选择了 clang backend，但未找到本地 clang"
+    ;;
+  llc)
+    [[ -n "${LLC_BIN}" ]] || die "选择了 llc backend，但未找到 llc"
+    ;;
+  *)
+    die "--codegen-backend 只支持 clang 或 llc"
+    ;;
+esac
 
 NEED_CLANGXX=0
 for source in "${EXTRA_SOURCES[@]}"; do
@@ -319,7 +457,7 @@ for source in "${EXTRA_SOURCES[@]}"; do
 done
 
 CLANGXX_BIN=""
-if [[ ${NEED_CLANGXX} -eq 1 ]]; then
+if [[ ${NEED_CLANGXX} -eq 1 && "${CODEGEN_BACKEND}" == "clang" ]]; then
   CLANGXX_BIN="$(find_tool "${CLANGXX_EXPLICIT}" "${CLANGXX_BIN:-}" "${TARGET_BIN_DIR}" "clang++")"
 fi
 
@@ -348,6 +486,9 @@ if [[ ${BUILD_RUNTIME} -eq 1 || ! -f "${LIBVORTEX_A}" ]]; then
   if [[ -n "${LIBCRT_VORTEX:-}" ]]; then
     make_args+=("LIBCRT_VORTEX=${LIBCRT_VORTEX}")
   fi
+  if [[ -n "${VORTEX_RUNTIME_CFLAGS:-}" ]]; then
+    make_args+=("CFLAGS=${VORTEX_RUNTIME_CFLAGS}")
+  fi
   make_args+=(make -C "${PLATFORM_ROOT}/kernel")
   run_cmd "${make_args[@]}"
 fi
@@ -373,10 +514,19 @@ if [[ -z "${LIBCRT_VORTEX_ROOT}" && -d "${REPO_ROOT}/../tools/libcrt${XLEN}" ]];
 fi
 
 declare -a TARGET_FLAGS=()
+declare -a GCC_ARCH_FLAGS=()
+LLC_FEATURES=""
+LLC_CPU=""
 if [[ "${XLEN}" == "64" ]]; then
   TARGET_FLAGS+=(--target=riscv64 -march=rv64imafd -mabi=lp64d)
+  GCC_ARCH_FLAGS+=(-march=rv64imafd -mabi=lp64d)
+  LLC_FEATURES="+m,+a,+f,+d,+vortex"
+  LLC_CPU="generic-rv64"
 else
   TARGET_FLAGS+=(--target=riscv32 -march=rv32imaf -mabi=ilp32f)
+  GCC_ARCH_FLAGS+=(-march=rv32imaf -mabi=ilp32f)
+  LLC_FEATURES="+m,+a,+f,+vortex"
+  LLC_CPU="generic-rv32"
 fi
 if [[ -n "${RISCV_SYSROOT_PATH}" ]]; then
   TARGET_FLAGS+=("--sysroot=${RISCV_SYSROOT_PATH}")
@@ -391,6 +541,7 @@ TARGET_FLAGS+=(-Xclang -target-feature -Xclang +vortex)
 TARGET_FLAGS+=("${CLANG_EXTRA_ARGS[@]}")
 
 declare -a INCLUDE_FLAGS=(
+  "-I${REPO_ROOT}/include"
   "-I${PLATFORM_ROOT}/kernel/include"
   "-I${PLATFORM_ROOT}/hw"
 )
@@ -407,9 +558,7 @@ declare -a LINK_FLAGS=(
   -Wl,-Bstatic,--gc-sections,-T,"${LINK_SCRIPT}",--defsym=STARTUP_ADDR="${STARTUP_ADDR}"
 )
 
-if [[ -n "${LIBC_VORTEX_ROOT}" && -d "${LIBC_VORTEX_ROOT}/lib" ]]; then
-  LINK_FLAGS+=("-L${LIBC_VORTEX_ROOT}/lib")
-fi
+declare -a LIBC_SEARCH_FLAGS=()
 
 BUILTINS_LIB=""
 if [[ -n "${LIBCRT_VORTEX_ROOT}" ]]; then
@@ -442,8 +591,67 @@ fi
 sanitize_llvm_dialect_mlir_for_translate "${LOWERED_MLIR}"
 run_cmd "${MLIR_TRANSLATE_BIN}" -mlir-to-llvmir "${LOWERED_MLIR}" -o "${LLVM_IR}"
 sanitize_llvm_ir_for_vortex_clang "${LLVM_IR}"
-run_cmd "${CLANG_BIN}" "${TARGET_FLAGS[@]}" "${COMMON_COMPILE_FLAGS[@]}" -S -x ir "${LLVM_IR}" -o "${ASM}"
-run_cmd "${CLANG_BIN}" "${TARGET_FLAGS[@]}" "${COMMON_COMPILE_FLAGS[@]}" -c -x ir "${LLVM_IR}" -o "${MODULE_OBJ}"
+
+RISCV_CC_BIN=""
+RISCV_CXX_BIN=""
+if [[ "${CODEGEN_BACKEND}" == "llc" ]]; then
+  if [[ -n "${RISCV_TOOLCHAIN_ROOT}" && -x "${RISCV_TOOLCHAIN_ROOT}/bin/riscv${XLEN}-unknown-elf-gcc" ]]; then
+    RISCV_CC_BIN="${RISCV_TOOLCHAIN_ROOT}/bin/riscv${XLEN}-unknown-elf-gcc"
+    RISCV_CXX_BIN="${RISCV_TOOLCHAIN_ROOT}/bin/riscv${XLEN}-unknown-elf-g++"
+  else
+    RISCV_CC_BIN="$(find_tool "" "" "" "riscv${XLEN}-unknown-elf-gcc")"
+    RISCV_CXX_BIN="$(find_tool_optional "" "" "" "riscv${XLEN}-unknown-elf-g++")"
+  fi
+  [[ -n "${RISCV_CC_BIN}" ]] || die "llc backend 需要 riscv${XLEN}-unknown-elf-gcc"
+fi
+
+RISCV_CC_FOR_MULTILIB="${RISCV_CC_BIN}"
+if [[ -z "${RISCV_CC_FOR_MULTILIB}" && -n "${RISCV_TOOLCHAIN_ROOT}" && -x "${RISCV_TOOLCHAIN_ROOT}/bin/riscv${XLEN}-unknown-elf-gcc" ]]; then
+  RISCV_CC_FOR_MULTILIB="${RISCV_TOOLCHAIN_ROOT}/bin/riscv${XLEN}-unknown-elf-gcc"
+fi
+
+MULTILIB_DIR=""
+if [[ -n "${RISCV_CC_FOR_MULTILIB}" ]]; then
+  MULTILIB_DIR="$("${RISCV_CC_FOR_MULTILIB}" "${GCC_ARCH_FLAGS[@]}" -print-multi-directory 2>/dev/null || true)"
+fi
+
+if [[ -n "${LIBC_VORTEX_ROOT}" && -d "${LIBC_VORTEX_ROOT}/lib" ]]; then
+  if [[ -n "${MULTILIB_DIR}" && -d "${LIBC_VORTEX_ROOT}/lib/${MULTILIB_DIR}" ]]; then
+    LIBC_SEARCH_FLAGS+=("-L${LIBC_VORTEX_ROOT}/lib/${MULTILIB_DIR}")
+  fi
+  LIBC_SEARCH_FLAGS+=("-L${LIBC_VORTEX_ROOT}/lib")
+fi
+
+if [[ "${CODEGEN_BACKEND}" == "clang" ]]; then
+  run_cmd "${CLANG_BIN}" "${TARGET_FLAGS[@]}" "${COMMON_COMPILE_FLAGS[@]}" \
+    -mllvm -vortex-kernel-scheduler=1 -S -x ir "${LLVM_IR}" -o "${ASM}"
+  run_cmd "${CLANG_BIN}" "${TARGET_FLAGS[@]}" "${COMMON_COMPILE_FLAGS[@]}" \
+    -mllvm -vortex-kernel-scheduler=1 -c -x ir "${LLVM_IR}" -o "${MODULE_OBJ}"
+else
+  llc_common=(
+    "${LLC_BIN}"
+    "-mtriple=riscv${XLEN}-unknown-elf"
+    "-mcpu=${LLC_CPU}"
+    "-mattr=${LLC_FEATURES}"
+    -code-model=medium
+    -relocation-model=static
+    --vortex-kernel-scheduler=1
+  )
+  run_cmd "${llc_common[@]}" -filetype=asm "${LLVM_IR}" -o "${ASM}"
+  if [[ "${VORTEX_RISCV_SP_OFFSET_WORKAROUND:-0}" == "1" ]]; then
+    workaround_large_riscv_sp_offsets "${ASM}"
+    LLVM_MC_BIN="$(find_tool "" "${LLVM_MC_BIN:-}" "${TARGET_BIN_DIR}" "llvm-mc")"
+    run_cmd "${LLVM_MC_BIN}" \
+      "-triple=riscv${XLEN}-unknown-elf" \
+      "-mcpu=${LLC_CPU}" \
+      "-mattr=${LLC_FEATURES}" \
+      -filetype=obj \
+      "${ASM}" \
+      -o "${MODULE_OBJ}"
+  else
+    run_cmd "${llc_common[@]}" -filetype=obj "${LLVM_IR}" -o "${MODULE_OBJ}"
+  fi
+fi
 
 declare -a EXTRA_OBJECTS=()
 source_index=0
@@ -452,46 +660,96 @@ for source in "${EXTRA_SOURCES[@]}"; do
   extension="${source##*.}"
   object_path="${OUTPUT_DIR}/${BASE_NAME}.extra${source_index}.o"
   compiler="${CLANG_BIN}"
-  case "${source}" in
-    *.cc|*.cpp|*.cxx|*.CPP|*.C)
-      compiler="${CLANGXX_BIN}"
-      ;;
-  esac
+  compile_cmd=()
 
-  compile_cmd=(
-    "${compiler}"
-    "${TARGET_FLAGS[@]}"
-    "${COMMON_COMPILE_FLAGS[@]}"
-    "${INCLUDE_FLAGS[@]}"
-    -c
-    "${source}"
-    -o
-    "${object_path}"
-  )
+  if [[ "${CODEGEN_BACKEND}" == "clang" ]]; then
+    case "${source}" in
+      *.cc|*.cpp|*.cxx|*.CPP|*.C)
+        compiler="${CLANGXX_BIN}"
+        ;;
+    esac
+
+    compile_cmd=(
+      "${compiler}"
+      "${TARGET_FLAGS[@]}"
+      "${COMMON_COMPILE_FLAGS[@]}"
+      "${INCLUDE_FLAGS[@]}"
+      -c
+      "${source}"
+      -o
+      "${object_path}"
+    )
+  else
+    case "${source}" in
+      *.cc|*.cpp|*.cxx|*.CPP|*.C)
+        [[ -n "${RISCV_CXX_BIN}" ]] || die "llc backend 遇到 C++ 额外源码，但未找到 riscv${XLEN}-unknown-elf-g++"
+        compiler="${RISCV_CXX_BIN}"
+        ;;
+      *)
+        compiler="${RISCV_CC_BIN}"
+        ;;
+    esac
+
+    compile_cmd=(
+      "${compiler}"
+      "${GCC_ARCH_FLAGS[@]}"
+      "${COMMON_COMPILE_FLAGS[@]}"
+      "${INCLUDE_FLAGS[@]}"
+      -c
+      "${source}"
+      -o
+      "${object_path}"
+    )
+  fi
+
   run_cmd "${compile_cmd[@]}"
   EXTRA_OBJECTS+=("${object_path}")
   source_index=$((source_index + 1))
 done
 
-link_cmd=(
-  "${CLANG_BIN}"
-  "${TARGET_FLAGS[@]}"
-  -O3
-  -mcmodel=medany
-  -fno-exceptions
-  -nostartfiles
-  -nostdlib
-  "${MODULE_OBJ}"
-  "${EXTRA_OBJECTS[@]}"
-  "${LINK_FLAGS[@]}"
-  "${LIBVORTEX_A}"
-  -lm
-  -lc
-)
+link_cmd=()
+if [[ "${CODEGEN_BACKEND}" == "clang" ]]; then
+  link_cmd=(
+    "${CLANG_BIN}"
+    "${TARGET_FLAGS[@]}"
+    -O3
+    -mcmodel=medany
+    -fno-exceptions
+    -nostartfiles
+    -nostdlib
+    "${MODULE_OBJ}"
+    "${EXTRA_OBJECTS[@]}"
+    "${LINK_FLAGS[@]}"
+    "${LIBC_SEARCH_FLAGS[@]}"
+    "${LIBVORTEX_A}"
+    -lm
+    -lc
+  )
+else
+  link_cmd=(
+    "${RISCV_CC_BIN}"
+    "${GCC_ARCH_FLAGS[@]}"
+    -O3
+    -mcmodel=medany
+    -fno-exceptions
+    -nostartfiles
+    -nostdlib
+    "${MODULE_OBJ}"
+    "${EXTRA_OBJECTS[@]}"
+    "${LINK_FLAGS[@]}"
+    "${LIBC_SEARCH_FLAGS[@]}"
+    "${LIBVORTEX_A}"
+    -lm
+    -lc
+  )
+fi
 
 # Find and add libgcc for compiler runtime builtins (soft-float, etc.)
 LIBGCC_PATH=""
-if [[ -n "${RISCV_TOOLCHAIN_ROOT}" ]]; then
+if [[ -n "${RISCV_CC_FOR_MULTILIB}" ]]; then
+  LIBGCC_PATH="$("${RISCV_CC_FOR_MULTILIB}" "${GCC_ARCH_FLAGS[@]}" -print-libgcc-file-name 2>/dev/null || true)"
+fi
+if [[ ( -z "${LIBGCC_PATH}" || ! -f "${LIBGCC_PATH}" ) && -n "${RISCV_TOOLCHAIN_ROOT}" ]]; then
   LIBGCC_PATH="$(find -L "${RISCV_TOOLCHAIN_ROOT}" -name "libgcc.a" -path "*/ilp32f/*" 2>/dev/null | head -1)"
   if [[ -z "${LIBGCC_PATH}" ]]; then
     LIBGCC_PATH="$(find -L "${RISCV_TOOLCHAIN_ROOT}" -name "libgcc.a" 2>/dev/null | head -1)"
@@ -513,6 +771,7 @@ run_cmd "${link_cmd[@]}"
 run_cmd "${OBJCOPY_BIN}" -O binary "${ELF}" "${BIN}"
 run_cmd "${OBJDUMP_BIN}" -D "${ELF}" > "${DUMP}"
 
+log "codegen backend: ${CODEGEN_BACKEND}"
 log "generated: ${LOWERED_MLIR}"
 log "generated: ${LLVM_IR}"
 log "generated: ${ASM}"

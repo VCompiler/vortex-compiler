@@ -1,4 +1,4 @@
-// RUN: vx-opt %s --allow-unregistered-dialect --vortex-tile-matmul-for-pre-vortex='tile-size=8' | FileCheck %s
+// RUN: vx-opt %s --allow-unregistered-dialect --vortex-tile-matmul-for-pre-vortex='tile-size=8 block-m=8 block-n=4 block-k=4 num-subgroups=2 num-threads=4' | FileCheck %s
 
 func.func @main_graph(%arg0: memref<16x16xf32>,
                       %arg1: memref<16x16xf32>,
@@ -14,15 +14,32 @@ func.func @main_graph(%arg0: memref<16x16xf32>,
 
 // CHECK-LABEL: func.func @main_graph
 // CHECK: %[[C0:.+]] = arith.constant 0 : index
+// CHECK: %[[C1:.+]] = arith.constant 1 : index
 // CHECK: %[[C8:.+]] = arith.constant 8 : index
-// CHECK: %[[C16:.+]] = arith.constant 16 : index
-// CHECK: scf.for
-// CHECK: scf.for
-// CHECK: %[[CTILE:.+]] = memref.subview %arg2
-// CHECK: linalg.fill ins(%cst : f32) outs(%[[CTILE]]
-// CHECK: scf.for
-// CHECK: %[[ATILE:.+]] = memref.subview %arg0
-// CHECK: %[[BTILE:.+]] = memref.subview %arg1
-// CHECK: linalg.matmul ins(%[[ATILE]], %[[BTILE]]
+// CHECK: %[[C4:.+]] = arith.constant 4 : index
+// CHECK: scf.for {{.*}} step %[[C8]] {
+// CHECK: scf.for {{.*}} step %{{.*}} {
+// CHECK: %[[CTILE:.+]] = memref.subview %arg2{{.*}} [8, 4] [1, 1]
+// CHECK: memref.store %cst, %[[CTILE]]
+// CHECK: } {vortex.mapping = "thread"}
+// CHECK: } {vortex.mapping = "subgroup"}
+// CHECK: scf.for {{.*}} step %{{.*}} {
+// CHECK: %[[ATILE:.+]] = memref.subview %arg0{{.*}} [8, 4] [1, 1] {vortex.promote_to_local}
+// CHECK: %[[BTILE:.+]] = memref.subview %arg1{{.*}} [4, 4] [1, 1] {vortex.promote_to_local}
+// CHECK: arith.mulf
+// CHECK: arith.addf
+// CHECK: memref.store {{.*}}, %[[CTILE]]
+// CHECK: } {vortex.mapping = "thread"}
+// CHECK: } {vortex.mapping = "subgroup"}
+// CHECK: } {vortex.matmul_schedule =
+// CHECK-SAME: block_k = 4 : i64
+// CHECK-SAME: block_m = 8 : i64
+// CHECK-SAME: block_n = 4 : i64
+// CHECK-SAME: compute_policy = "linear_tid_2d"
+// CHECK-SAME: copy_policy = "linear_stride"
+// CHECK-SAME: num_subgroups = 2 : i64
+// CHECK-SAME: num_threads = 4 : i64
 // CHECK-NOT: memref.alloc
 // CHECK-NOT: memref.copy
+// CHECK-NOT: linalg.fill
+// CHECK-NOT: linalg.matmul

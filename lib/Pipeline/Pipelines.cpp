@@ -20,8 +20,28 @@ struct ONNXMatmulToPreVortexPipelineOptions
     : public PassPipelineOptions<ONNXMatmulToPreVortexPipelineOptions> {
   Option<int64_t> tileSize{
       *this, "tile-size",
-      llvm::cl::desc("Uniform static tile size for the frontend matmul tiling"),
+      llvm::cl::desc("Fallback uniform static tile size for matmul tiling"),
       llvm::cl::init(8)};
+  Option<int64_t> blockM{
+      *this, "block-m",
+      llvm::cl::desc("Static M dimension block size; defaults to tile-size"),
+      llvm::cl::init(0)};
+  Option<int64_t> blockN{
+      *this, "block-n",
+      llvm::cl::desc("Static N dimension block size; defaults to tile-size"),
+      llvm::cl::init(0)};
+  Option<int64_t> blockK{
+      *this, "block-k",
+      llvm::cl::desc("Static K dimension block size; defaults to tile-size"),
+      llvm::cl::init(0)};
+  Option<int64_t> numSubgroups{
+      *this, "num-subgroups",
+      llvm::cl::desc("Number of Vortex subgroups per scheduled tile"),
+      llvm::cl::init(2)};
+  Option<int64_t> numThreads{
+      *this, "num-threads",
+      llvm::cl::desc("Number of Vortex threads per subgroup per scheduled tile"),
+      llvm::cl::init(4)};
 };
 
 } // namespace
@@ -36,6 +56,11 @@ static void buildONNXMatmulToPreVortexPipeline(
 #endif
   TileMatmulForPreVortexOptions tileOptions;
   tileOptions.tileSize = options.tileSize;
+  tileOptions.blockM = options.blockM;
+  tileOptions.blockN = options.blockN;
+  tileOptions.blockK = options.blockK;
+  tileOptions.numSubgroups = options.numSubgroups;
+  tileOptions.numThreads = options.numThreads;
 
   pm.addPass(bufferization::createBufferResultsToOutParamsPass(
       outParamOptions));

@@ -24,6 +24,10 @@ static bool isFrontendAttrName(StringRef name) {
          name.starts_with(kONNXMLIRAttrPrefix);
 }
 
+static bool isONNXEntryPointOp(Operation *op) {
+  return op->getName().getStringRef().contains(kONNXEntryPointOpName);
+}
+
 static void stripFrontendAttrs(Operation *op) {
   SmallVector<StringAttr> attrsToRemove;
   for (NamedAttribute namedAttr : op->getAttrs()) {
@@ -59,9 +63,21 @@ static void stripFuncBoundaryFrontendAttrs(func::FuncOp func) {
   }
 }
 
+static FlatSymbolRefAttr getEntryPointFuncAttr(Operation *entryOp) {
+  if (auto funcAttr = entryOp->getAttrOfType<FlatSymbolRefAttr>("func"))
+    return funcAttr;
+
+  auto properties = dyn_cast_or_null<DictionaryAttr>(
+      entryOp->getPropertiesAsAttribute());
+  if (!properties)
+    return {};
+
+  return dyn_cast_or_null<FlatSymbolRefAttr>(properties.get("func"));
+}
+
 static LogicalResult materializeFrontendEntryPoint(Operation *entryOp,
                                                    ModuleOp module) {
-  auto funcAttr = entryOp->getAttrOfType<FlatSymbolRefAttr>("func");
+  FlatSymbolRefAttr funcAttr = getEntryPointFuncAttr(entryOp);
   if (!funcAttr) {
     return entryOp->emitOpError()
            << "requires FlatSymbolRefAttr 'func' to identify the entry "
@@ -89,10 +105,10 @@ struct NormalizeONNXFrontend
     ModuleOp module = getOperation();
 
     SmallVector<Operation *> entryOps;
-    for (Operation &op : module.getBody()->without_terminator()) {
-      if (op.getName().getStringRef() == kONNXEntryPointOpName)
-        entryOps.push_back(&op);
-    }
+    module.walk([&](Operation *op) {
+      if (op != module.getOperation() && isONNXEntryPointOp(op))
+        entryOps.push_back(op);
+    });
 
     for (Operation *entryOp : entryOps) {
       if (failed(materializeFrontendEntryPoint(entryOp, module))) {

@@ -3,7 +3,10 @@
 /.venv-guppy-stagea/
 /ramulator.stats.log
 /trace/
+/third_party/llvm-build/
 /third_party/llvm-vortex-build/
+/vivado*.jou
+/vivado*.log
 
 # Generated configuration files.
 /CMakeCache.txt

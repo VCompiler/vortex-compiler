@@ -120,6 +120,12 @@ find_objcopy() {
     return
   fi
 
+  local repo_objcopy="${REPO_ROOT}/third_party/llvm-build/bin/llvm-objcopy"
+  if [[ -x "${repo_objcopy}" ]]; then
+    printf '%s\n' "${repo_objcopy}"
+    return
+  fi
+
   if command -v llvm-objcopy >/dev/null 2>&1; then
     command -v llvm-objcopy
     return

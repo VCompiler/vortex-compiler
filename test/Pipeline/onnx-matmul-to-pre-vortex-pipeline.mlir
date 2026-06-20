@@ -18,8 +18,21 @@ module attributes {llvm.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i6
 
 // CHECK-LABEL: func.func @main_graph(%arg0: memref<16x16xf32>, %arg1: memref<16x16xf32>, %arg2: memref<16x16xf32>) attributes
 // CHECK-SAME: vortex.entry
-// CHECK-SAME: vortex.pre_vortex_dialects = ["arith", "linalg", "memref", "scf"]
-// CHECK: %[[CTILE:.+]] = memref.subview %arg2
-// CHECK: linalg.fill
-// CHECK: linalg.matmul
+// CHECK-SAME: vortex.pre_vortex_dialects = ["arith", "memref", "scf"]
+// CHECK: %[[CTILE:.+]] = memref.subview %arg2{{.*}} [8, 8] [1, 1]
+// CHECK: memref.store %cst, %[[CTILE]]
+// CHECK: } {vortex.mapping = "thread"}
+// CHECK: } {vortex.mapping = "subgroup"}
+// CHECK: %[[ATILE:.+]] = memref.subview %arg0{{.*}} [8, 8] [1, 1] {vortex.promote_to_local}
+// CHECK: %[[BTILE:.+]] = memref.subview %arg1{{.*}} [8, 8] [1, 1] {vortex.promote_to_local}
+// CHECK: arith.mulf
+// CHECK: arith.addf
+// CHECK: } {vortex.matmul_schedule =
+// CHECK-SAME: block_k = 8 : i64
+// CHECK-SAME: block_m = 8 : i64
+// CHECK-SAME: block_n = 8 : i64
+// CHECK-SAME: num_subgroups = 2 : i64
+// CHECK-SAME: num_threads = 4 : i64
 // CHECK-NOT: "onnx.EntryPoint"
+// CHECK-NOT: linalg.fill
+// CHECK-NOT: linalg.matmul

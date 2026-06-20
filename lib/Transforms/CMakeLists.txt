@@ -1,5 +1,7 @@
 add_mlir_library(MLIRVortexTransforms
   ConvertVortexToLLVMPass.cpp
+  DistributeVortexLocalCopiesPass.cpp
+  FuseLinearWithBiasPass.cpp
   InsertVortexBarriersPass.cpp
   LowerVortexLocalMemoryPass.cpp
   LowerLinalgInsideVortexKernelPass.cpp

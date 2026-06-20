@@ -94,6 +94,32 @@ def InsertVortexBarriers
   }];
 }
 
+def DistributeVortexLocalCopies
+    : Pass<"vortex-distribute-local-copies", "::mlir::func::FuncOp"> {
+  let summary = "Rewrite local/global memref.copy operations into cooperative per-lane loops.";
+  let description = [{
+    Rewrites the narrow local tile copy pattern produced by tile promotion and
+    barrier insertion:
+
+      - `memref.copy global -> local`
+      - `memref.copy local -> global`
+
+    into explicit `scf.for` loops that distribute the copy across the lanes in
+    the current core:
+
+      - `linear_tid = vortex.subgroup_id * num_threads + vortex.thread_id`
+      - `lane_count = num_subgroups * num_threads`
+      - each lane copies `i, i + lane_count, ...`
+
+    The first implementation intentionally stays narrow:
+
+      - only rewrites copies inside `vortex.launch`
+      - only handles one global side and one local side
+      - requires source and target to have the same static shape
+      - leaves global-global and local-local copies unchanged
+  }];
+}
+
 def PlanVortexLocalMemoryLayout
     : Pass<"vortex-plan-local-memory-layout", "::mlir::func::FuncOp"> {
   let summary = "Assign byte offsets and frame size attributes to vortex.local_alloc buffers.";
@@ -161,6 +187,30 @@ def LowerLinalgInsideVortexKernel
     promotion, and barrier insertion, so the Vortex-specific execution and
     memory structure stays explicit while the compute body moves to a form that
     is easier to lower further toward LLVM.
+  }];
+}
+
+def FuseLinearWithBias
+    : Pass<"vortex-fuse-linear-with-bias", "::mlir::func::FuncOp"> {
+  let summary = "Fuse rank-2 linear linalg patterns into scalar scf loops with register accumulators.";
+  let description = [{
+    Rewrites the narrow buffer-semantics linear pattern:
+
+      - `linalg.fill` initializing an output memref
+      - `linalg.generic` contraction with maps
+        `(i, j, k) -> (i, k)`, `(i, j, k) -> (j, k)`,
+        `(i, j, k) -> (i, j)`
+      - optional immediately following bias add generic
+        `out[i, j] + bias[j] -> out[i, j]`
+
+    into explicit `scf.for` loops where the reduction accumulator is carried
+    as an `scf.for iter_args` scalar. This avoids lowering the reduction into
+    repeated accumulator loads/stores on the output memref.
+
+    The first implementation is intentionally narrow and only handles
+    static-shape rank-2 `f32` memrefs inside functions already marked as
+    Vortex kernels. Non-matching linalg operations are left for
+    `vortex-lower-linalg-inside-kernel`.
   }];
 }
 
@@ -262,16 +312,27 @@ def TileMatmulForPreVortex
       - optional frontend out-param wrapper pattern
         `alloc + fill + matmul + memref.copy alloc -> output`
 
-    The rewritten IR keeps the compute in `linalg.matmul`, but materializes:
+    The rewritten IR materializes a first Vortex schedule contract:
 
-      - outer `scf.for` tile loops
+      - outer `scf.for` tile loops with `vortex.matmul_schedule` metadata
       - `memref.subview` tile views for A/B/C
-      - tiled `linalg.fill`
-      - tiled inner `linalg.matmul`
+      - `vortex.mapping = "subgroup" | "thread"` lane loops
+      - `vortex.promote_to_local` markers on A/B tile views
+      - scalar per-lane matmul compute over the C tile
   }];
   let options = [
     Option<"tileSize", "tile-size", "int64_t", "8",
-           "Uniform static tile size for M/N/K tiling">
+           "Fallback uniform static tile size for M/N/K tiling">,
+    Option<"blockM", "block-m", "int64_t", "0",
+           "Static M dimension block size; defaults to tile-size when unset">,
+    Option<"blockN", "block-n", "int64_t", "0",
+           "Static N dimension block size; defaults to tile-size when unset">,
+    Option<"blockK", "block-k", "int64_t", "0",
+           "Static K dimension block size; defaults to tile-size when unset">,
+    Option<"numSubgroups", "num-subgroups", "int64_t", "2",
+           "Number of Vortex subgroups participating in each scheduled tile">,
+    Option<"numThreads", "num-threads", "int64_t", "4",
+           "Number of Vortex threads per subgroup participating in each scheduled tile">
   ];
 }
 

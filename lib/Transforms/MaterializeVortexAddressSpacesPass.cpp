@@ -78,6 +78,7 @@ static LogicalResult rewriteSubviewResultTypes(func::FuncOp func) {
         subview.getLoc(), newResultType, subview.getSource(),
         subview.getMixedOffsets(), subview.getMixedSizes(),
         subview.getMixedStrides());
+    newSubview->setAttrs(subview->getAttrs());
     rewriter.replaceOp(subview, newSubview.getResult());
   }
 
@@ -105,6 +106,7 @@ static LogicalResult rewriteCastResultTypes(func::FuncOp func) {
     auto newCast = rewriter.create<memref::CastOp>(castOp.getLoc(),
                                                    newResultType,
                                                    castOp.getSource());
+    newCast->setAttrs(castOp->getAttrs());
     rewriter.replaceOp(castOp, newCast.getResult());
   }
 

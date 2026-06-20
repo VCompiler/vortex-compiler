@@ -6,36 +6,31 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 usage() {
   cat <<'EOF'
-用法:
-  run-matmul4x4-smoke.sh \
+Usage:
+  run-local-memory-smoke.sh \
     [--platform-root /path/to/vortex-platform] \
-    [--output-dir build/smoke/matmul4x4_f32] \
-    [--driver simx|rtlsim|board|local-xdma] \
+    [--output-dir build/smoke/local_memory_i32] \
+    [--driver simx|rtlsim|board] \
     [--build-sim] \
     [--build-third-party] \
     [--no-proxy] \
     [--make-var 'NAME=VALUE'] ... \
     [--sim-arg ARG] ... \
     [--board-arg ARG] ... \
-    [--xdma-arg ARG] ... \
     [--build-arg ARG] ... \
     [--verbose]
 
-说明:
-  1. 用 examples/smoke/matmul4x4_f32.mlir 生成 bare-pointer kernel
-  2. 额外链接 C wrapper，形成可执行 ELF/bin
-  3. 默认跑 simx；若 --driver board，则调用 xc7k480t 的 JTAG board runner
-  4. 若 --driver local-xdma，则生成 manifest 并调用 local-XDMA runner
-  5. 若 kernel 返回非 0，则脚本失败
+Builds and runs a minimal Vortex local-memory smoke. The generated assembly is
+checked to contain a CSR read of lmem_base and no call to vx_local_mem_base.
 EOF
 }
 
 log() {
-  echo "[matmul4x4-smoke] $*"
+  echo "[local-memory-smoke] $*"
 }
 
 die() {
-  echo "[matmul4x4-smoke] error: $*" >&2
+  echo "[local-memory-smoke] error: $*" >&2
   exit 1
 }
 
@@ -66,10 +61,10 @@ resolve_abs_path() {
   fi
 }
 
-PIPELINE="builtin.module(func.func(vortex-mark-kernel{remove-entry-attr=1},vortex-materialize-address-spaces,vortex-lower-linalg-inside-kernel),canonicalize,cse,vortex-legalize-for-llvm,vortex-lower-runtime-builtins,canonicalize,cse,convert-scf-to-cf,convert-arith-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,convert-func-to-llvm{use-bare-ptr-memref-call-conv=1},convert-cf-to-llvm,reconcile-unrealized-casts)"
+PIPELINE="builtin.module(func.func(vortex-mark-kernel{remove-entry-attr=1},vortex-materialize-address-spaces),func.func(vortex-plan-local-memory-layout),vortex-lower-local-memory,canonicalize,cse,vortex-legalize-for-llvm,vortex-lower-runtime-builtins,canonicalize,cse,convert-scf-to-cf,convert-arith-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,convert-func-to-llvm{use-bare-ptr-memref-call-conv=1},convert-cf-to-llvm,reconcile-unrealized-casts)"
 
 PLATFORM_ROOT=""
-OUTPUT_DIR="${REPO_ROOT}/build/smoke/matmul4x4_f32"
+OUTPUT_DIR="${REPO_ROOT}/build/smoke/local_memory_i32"
 DRIVER="simx"
 BUILD_SIM=0
 BUILD_THIRD_PARTY=0
@@ -91,7 +86,6 @@ declare -a BOARD_ARGS=(
   --hw-server-bind
   ""
 )
-declare -a XDMA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -131,10 +125,6 @@ while [[ $# -gt 0 ]]; do
       BOARD_ARGS+=("$2")
       shift 2
       ;;
-    --xdma-arg)
-      XDMA_ARGS+=("$2")
-      shift 2
-      ;;
     --build-arg)
       BUILD_ARGS+=("$2")
       shift 2
@@ -148,16 +138,16 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      die "未知参数: $1"
+      die "unknown argument: $1"
       ;;
   esac
 done
 
 case "${DRIVER}" in
-  simx|rtlsim|board|local-xdma)
+  simx|rtlsim|board)
     ;;
   *)
-    die "--driver 只支持 simx、rtlsim、board 或 local-xdma"
+    die "--driver only supports simx, rtlsim, or board"
     ;;
 esac
 
@@ -167,12 +157,10 @@ fi
 mkdir -p "${OUTPUT_DIR}"
 OUTPUT_DIR="$(resolve_abs_path "${OUTPUT_DIR}")"
 
-INPUT_MLIR="${REPO_ROOT}/examples/smoke/matmul4x4_f32.mlir"
-WRAPPER_C="${REPO_ROOT}/examples/smoke/matmul4x4_f32_wrapper.c"
-if [[ "${DRIVER}" == "local-xdma" ]]; then
-  WRAPPER_C="${REPO_ROOT}/examples/smoke/matmul4x4_f32_board_xdma_wrapper.c"
-fi
-ELF_PATH="${OUTPUT_DIR}/matmul4x4_f32.elf"
+INPUT_MLIR="${REPO_ROOT}/examples/smoke/local_memory_i32.mlir"
+WRAPPER_C="${REPO_ROOT}/examples/smoke/local_memory_i32_wrapper.c"
+ELF_PATH="${OUTPUT_DIR}/local_memory_i32.elf"
+ASM_PATH="${OUTPUT_DIR}/local_memory_i32.s"
 
 build_cmd=(
   "${REPO_ROOT}/scripts/build-vortex-kernel.sh"
@@ -180,12 +168,9 @@ build_cmd=(
   --output-dir "${OUTPUT_DIR}"
   --pass-pipeline "${PIPELINE}"
   --extra-source "${WRAPPER_C}"
+  --codegen-backend llc
   --build-runtime
 )
-
-if [[ "${DRIVER}" == "local-xdma" ]]; then
-  build_cmd+=(--board-xdma-abi)
-fi
 
 if [[ -n "${PLATFORM_ROOT}" ]]; then
   build_cmd+=(--platform-root "${PLATFORM_ROOT}")
@@ -197,13 +182,22 @@ for arg in "${BUILD_ARGS[@]}"; do
   build_cmd+=("${arg}")
 done
 
-log "构建 4x4 matmul smoke kernel"
+log "building local-memory smoke kernel"
 run_cmd "${build_cmd[@]}"
 
+[[ -f "${ASM_PATH}" ]] || die "missing assembly: ${ASM_PATH}"
+if ! grep -Eq '(^|[[:space:]])csrr[[:space:]]+[^,]+,[[:space:]]+lmem_base' "${ASM_PATH}"; then
+  die "expected csrr ..., lmem_base in ${ASM_PATH}"
+fi
+if grep -Eq '(^|[[:space:]])call[[:space:]]+vx_local_mem_base' "${ASM_PATH}"; then
+  die "unexpected call vx_local_mem_base in ${ASM_PATH}"
+fi
+log "assembly check passed: csrr ..., lmem_base"
+
 if [[ "${DRIVER}" == "board" ]]; then
-  [[ -n "${PLATFORM_ROOT}" ]] || die "--driver board 需要 --platform-root"
+  [[ -n "${PLATFORM_ROOT}" ]] || die "--driver board requires --platform-root"
   BOARD_RUNNER="${PLATFORM_ROOT}/hw/syn/xilinx/xc7k480t/board_run_elf.sh"
-  [[ -f "${BOARD_RUNNER}" ]] || die "缺少 board runner: ${BOARD_RUNNER}"
+  [[ -f "${BOARD_RUNNER}" ]] || die "missing board runner: ${BOARD_RUNNER}"
 
   board_cmd=(
     "${BOARD_RUNNER}"
@@ -213,43 +207,8 @@ if [[ "${DRIVER}" == "board" ]]; then
     board_cmd+=(-- "${BOARD_ARGS[@]}")
   fi
 
-  log "运行 board 冒烟"
+  log "running board smoke"
   run_cmd "${board_cmd[@]}"
-elif [[ "${DRIVER}" == "local-xdma" ]]; then
-  [[ -n "${PLATFORM_ROOT}" ]] || die "--driver local-xdma 需要 --platform-root"
-  XDMA_MANIFEST="${OUTPUT_DIR}/local_xdma_manifest.json"
-  cat > "${XDMA_MANIFEST}" <<EOF
-{
-  "schema_version": 1,
-  "name": "matmul4x4_local_xdma",
-  "kernel_elf": "${ELF_PATH}",
-  "startup_addr": "0x80000000",
-  "startup_arg": "0x0",
-  "expect_exit_word": "0x00000000",
-  "require_exit_seen": true,
-  "segments": [],
-  "outputs": []
-}
-EOF
-
-  xdma_cmd=(
-    "${REPO_ROOT}/scripts/run-vortex-board-xdma.sh"
-    --manifest "${XDMA_MANIFEST}"
-    --platform-root "${PLATFORM_ROOT}"
-    --stage-dir "${OUTPUT_DIR}/xdma_run"
-    --timeout-sec 60
-    --require-busy 1
-    --status-interval-sec 2
-  )
-  if [[ ${VERBOSE} -eq 1 ]]; then
-    xdma_cmd+=(--verbose)
-  fi
-  for arg in "${XDMA_ARGS[@]}"; do
-    xdma_cmd+=("${arg}")
-  done
-
-  log "运行 local-XDMA 冒烟"
-  run_cmd "${xdma_cmd[@]}"
 else
   sim_cmd=(
     "${REPO_ROOT}/scripts/run-vortex-sim.sh"
@@ -279,7 +238,7 @@ else
     sim_cmd+=(--sim-arg "${sim_arg}")
   done
 
-  log "运行 ${DRIVER} 冒烟"
+  log "running ${DRIVER} smoke"
   run_cmd "${sim_cmd[@]}"
 fi
 
