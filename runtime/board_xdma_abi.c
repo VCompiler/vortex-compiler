@@ -34,8 +34,8 @@ void vortex_board_xdma_progress(volatile int *progress, int value) {
   vortex_board_xdma_host_visible_fence();
 }
 
-void vortex_board_xdma_exit(int status) {
-  if (vortex_board_xdma_is_control_lane()) {
+void vortex_board_xdma_exit_if(int status, int should_write) {
+  if (should_write) {
     vortex_board_xdma_host_visible_fence();
     *(volatile uint32_t *)VORTEX_BOARD_XDMA_EXIT_ADDR = (uint32_t)status;
     vortex_board_xdma_host_visible_fence();
@@ -45,4 +45,8 @@ void vortex_board_xdma_exit(int status) {
   for (;;) {
     __asm__ volatile("" ::: "memory");
   }
+}
+
+void vortex_board_xdma_exit(int status) {
+  vortex_board_xdma_exit_if(status, vortex_board_xdma_is_control_lane());
 }

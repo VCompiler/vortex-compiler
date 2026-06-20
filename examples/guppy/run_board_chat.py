@@ -13,7 +13,7 @@ from pathlib import Path
 
 PIPELINE = (
     "builtin.module("
-    "func.func(vortex-mark-kernel{remove-entry-attr=1},vortex-lower-linalg-inside-kernel),"
+    "func.func(vortex-mark-kernel{remove-entry-attr=1},vortex-fuse-linear-with-bias,vortex-lower-linalg-inside-kernel),"
     "canonicalize,cse,"
     "vortex-legalize-for-llvm,"
     "vortex-lower-runtime-builtins,"
@@ -28,6 +28,8 @@ PIPELINE = (
     "convert-cf-to-llvm,"
     "reconcile-unrealized-casts)"
 )
+
+SPLIT_POST_ATTN_STARTUP_ADDR = "0x81F00000"
 
 
 def run_cmd(cmd: list[str], *, cwd: Path) -> None:
@@ -86,6 +88,9 @@ def stage_matches(
     sequence_length: int,
     layer_limit: int,
     tolerance: float,
+    attn_out_thread_mode: str,
+    ffn_thread_mode: str,
+    pcie_default_split_stage: int | None,
 ) -> bool:
     manifest_path = stage_dir / "full_inference_manifest.json"
     required = [
@@ -93,16 +98,34 @@ def stage_matches(
         stage_dir / "full_inference.mlir",
         stage_dir / "full_inference_wrapper.c",
         stage_dir / "full_inference_weights.S",
+        stage_dir / "split_post_attn.mlir",
+        stage_dir / "split_post_attn_wrapper.c",
     ]
     if not all(path.is_file() for path in required):
         return False
     manifest = load_json(manifest_path)
-    return (
+    if not (
         int(manifest.get("sequence_length", -1)) == sequence_length
         and int(manifest.get("layer_limit", -1)) == layer_limit
         and str(manifest.get("bundle_dir", "")) == str(bundle_dir)
         and abs(float(manifest.get("tolerance", -1.0)) - tolerance) < 1.0e-12
-    )
+        and str(manifest.get("attn_out_thread_mode", "serial")) == attn_out_thread_mode
+        and str(manifest.get("ffn_thread_mode", "serial")) == ffn_thread_mode
+    ):
+        return False
+    if pcie_default_split_stage is not None:
+        return int(manifest.get("pcie_default_split_stage", -1)) == int(
+            pcie_default_split_stage
+        )
+    return True
+
+
+def effective_pcie_default_split_stage(args: argparse.Namespace) -> int | None:
+    if args.pcie_default_split_stage is not None:
+        return int(args.pcie_default_split_stage)
+    if not args.pcie_split_workaround:
+        return 0
+    return None
 
 
 def has_built_elf(stage_dir: Path) -> bool:
@@ -114,6 +137,20 @@ def has_built_elf(stage_dir: Path) -> bool:
         out_dir / "full_inference.s",
     ]
     return all(path.is_file() for path in required)
+
+
+def has_built_split_post_attn_elf(stage_dir: Path) -> bool:
+    out_dir = stage_dir / "out_split_post_attn"
+    required = [
+        out_dir / "split_post_attn.elf",
+        out_dir / "split_post_attn.bin",
+        out_dir / "split_post_attn.ll",
+        out_dir / "split_post_attn.s",
+        out_dir / "startup_addr.txt",
+    ]
+    if not all(path.is_file() for path in required):
+        return False
+    return (out_dir / "startup_addr.txt").read_text(encoding="utf-8").strip() == SPLIT_POST_ATTN_STARTUP_ADDR
 
 
 def ensure_assets(args: argparse.Namespace, repo_root: Path) -> None:
@@ -176,6 +213,7 @@ def ensure_stage(
     sequence_length: int,
     layer_limit: int,
 ) -> None:
+    pcie_default_split_stage = effective_pcie_default_split_stage(args)
     if (
         stage_matches(
             args.stage_dir,
@@ -183,12 +221,14 @@ def ensure_stage(
             sequence_length=sequence_length,
             layer_limit=layer_limit,
             tolerance=args.tolerance,
+            attn_out_thread_mode=args.attn_out_thread_mode,
+            ffn_thread_mode=args.ffn_thread_mode,
+            pcie_default_split_stage=pcie_default_split_stage,
         )
         and not args.force_regen
     ):
         return
-    run_cmd(
-        [
+    cmd = [
             sys.executable,
             str(repo_root / "examples" / "guppy" / "gen_full_inference.py"),
             "--bundle-dir",
@@ -201,41 +241,81 @@ def ensure_stage(
             str(layer_limit),
             "--tolerance",
             str(args.tolerance),
-        ],
-        cwd=repo_root,
-    )
+            "--attn-out-thread-mode",
+            args.attn_out_thread_mode,
+            "--ffn-thread-mode",
+            args.ffn_thread_mode,
+    ]
+    if pcie_default_split_stage is not None:
+        cmd.extend(
+            [
+                "--pcie-default-split-stage",
+                str(pcie_default_split_stage),
+            ]
+        )
+    run_cmd(cmd, cwd=repo_root)
 
 
 def ensure_build(args: argparse.Namespace, repo_root: Path) -> None:
-    if has_built_elf(args.stage_dir) and not args.force_build:
-        return
     vx_opt = repo_root / "build" / "bin" / "vx-opt"
-    run_cmd(
-        [
-            str(repo_root / "scripts" / "build-vortex-kernel.sh"),
-            "--input",
-            str(args.stage_dir / "full_inference.mlir"),
-            "--output-dir",
-            str(args.stage_dir / "out"),
-            "--platform-root",
-            str(args.platform_root),
-            "--extra-source",
-            str(args.stage_dir / "full_inference_wrapper.c"),
-            "--extra-source",
-            str(args.stage_dir / "full_inference_weights.S"),
-            "--vx-opt",
-            str(vx_opt),
-            "--pass-pipeline",
-            PIPELINE,
-        ],
-        cwd=repo_root,
-    )
+    if not has_built_elf(args.stage_dir) or args.force_build:
+        run_cmd(
+            [
+                str(repo_root / "scripts" / "build-vortex-kernel.sh"),
+                "--board-xdma-abi",
+                "--input",
+                str(args.stage_dir / "full_inference.mlir"),
+                "--output-dir",
+                str(args.stage_dir / "out"),
+                "--platform-root",
+                str(args.platform_root),
+                "--extra-source",
+                str(args.stage_dir / "full_inference_wrapper.c"),
+                "--extra-source",
+                str(args.stage_dir / "full_inference_weights.S"),
+                "--vx-opt",
+                str(vx_opt),
+                "--pass-pipeline",
+                PIPELINE,
+            ],
+            cwd=repo_root,
+        )
+    if not has_built_split_post_attn_elf(args.stage_dir) or args.force_build:
+        run_cmd(
+            [
+                str(repo_root / "scripts" / "build-vortex-kernel.sh"),
+                "--board-xdma-abi",
+                "--input",
+                str(args.stage_dir / "split_post_attn.mlir"),
+                "--output-dir",
+                str(args.stage_dir / "out_split_post_attn"),
+                "--platform-root",
+                str(args.platform_root),
+                "--extra-source",
+                str(args.stage_dir / "split_post_attn_wrapper.c"),
+                "--extra-source",
+                str(args.stage_dir / "full_inference_weights.S"),
+                "--vx-opt",
+                str(vx_opt),
+                "--pass-pipeline",
+                PIPELINE,
+                "--startup-addr",
+                SPLIT_POST_ATTN_STARTUP_ADDR,
+            ],
+            cwd=repo_root,
+        )
+        (args.stage_dir / "out_split_post_attn" / "startup_addr.txt").write_text(
+            SPLIT_POST_ATTN_STARTUP_ADDR + "\n",
+            encoding="utf-8",
+        )
 
 
 def run_board_chat(args: argparse.Namespace, repo_root: Path) -> int:
     cmd = [
         sys.executable,
         str(repo_root / "examples" / "guppy" / "chat_driver.py"),
+        "--runner-mode",
+        args.runner_mode,
         "--bundle-dir",
         str(args.bundle_dir),
         "--stage-dir",
@@ -248,6 +328,10 @@ def run_board_chat(args: argparse.Namespace, repo_root: Path) -> int:
         args.ltx_path,
         "--board-scripts-dir",
         args.board_scripts_dir,
+        "--board-runner",
+        args.board_runner,
+        "--vivado-settings-sh",
+        args.vivado_settings_sh,
         "--hw-server-url",
         args.hw_server_url,
         "--hw-server-bind",
@@ -281,6 +365,26 @@ def run_board_chat(args: argparse.Namespace, repo_root: Path) -> int:
         cmd.extend(["--status-poll-count", str(args.status_poll_count)])
     if args.status_poll_ms is not None:
         cmd.extend(["--status-poll-ms", str(args.status_poll_ms)])
+    if args.xdma_checkpoint_stage is not None:
+        cmd.extend(["--xdma-checkpoint-stage", str(args.xdma_checkpoint_stage)])
+    cmd.extend(
+        [
+            "--xdma-h2c-dev",
+            args.xdma_h2c_dev,
+            "--xdma-c2h-dev",
+            args.xdma_c2h_dev,
+            "--xdma-ctrl-dma-base",
+            args.xdma_ctrl_dma_base,
+            "--xdma-bdf",
+            args.xdma_bdf,
+        ]
+    )
+    cmd.append("--xdma-require-busy" if args.xdma_require_busy else "--no-xdma-require-busy")
+    cmd.append(
+        "--pcie-split-workaround"
+        if args.pcie_split_workaround
+        else "--no-pcie-split-workaround"
+    )
     if args.persistent_vivado_session:
         cmd.append("--persistent-vivado-session")
     if args.resident_reload_all_kernel_segments:
@@ -318,6 +422,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sequence-length", type=int, default=None, help="默认取 full max_seq_len")
     parser.add_argument("--layer-limit", type=int, default=None, help="默认取 full n_layers")
     parser.add_argument("--tolerance", type=float, default=5.0e-2, help="wrapper golden 容差")
+    parser.add_argument(
+        "--attn-out-thread-mode",
+        choices=("serial", "warp4"),
+        default="serial",
+        help="blocks.0.attn.out 单行 projection 的线程调度模式。",
+    )
+    parser.add_argument(
+        "--ffn-thread-mode",
+        choices=("serial", "warp4"),
+        default="serial",
+        help="blocks.0 FFN up/down 单行 projection 的线程调度模式。",
+    )
+    parser.add_argument(
+        "--pcie-default-split-stage",
+        type=int,
+        default=None,
+        help="生成 ELF 时默认写入 guppy_runtime_pcie_split_stage，用于 PCIe checkpoint 诊断",
+    )
     parser.add_argument("--platform-root", default=None, help="vortex-platform 根目录")
 
     parser.add_argument("--prompt-text", default=None, help="快捷输入：单条 user prompt")
@@ -331,32 +453,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-k", type=int, default=8, help="打印 top-k")
     parser.add_argument("--llvm-nm", default=None, help="显式指定 llvm-nm")
 
+    parser.add_argument("--runner-mode", choices=["local-jtag", "local-xdma", "service"], default="local-jtag")
     parser.add_argument("--service-url", default="http://100.125.4.76:18001")
-    parser.add_argument(
-        "--bit-path",
-        default=(
-            "E:/fpga/repo/vx_xc7k480t_jtag_axi_20260405/"
-            "jtag_axi_build/jtag_axi_build.runs/impl_1/xc7k480t_vortex_board_top.bit"
-        ),
-    )
-    parser.add_argument(
-        "--ltx-path",
-        default=(
-            "E:/fpga/repo/vx_xc7k480t_jtag_axi_20260405/"
-            "jtag_axi_build/jtag_axi_build.runs/impl_1/xc7k480t_vortex_board_top.ltx"
-        ),
-    )
-    parser.add_argument("--board-scripts-dir", default="E:/fpga/out")
-    parser.add_argument("--hw-server-url", default="TCP:localhost:3121")
-    parser.add_argument("--hw-server-bind", default="TCP:localhost:3121")
+    parser.add_argument("--bit-path", default=None)
+    parser.add_argument("--ltx-path", default=None)
+    parser.add_argument("--board-scripts-dir", default=None)
+    parser.add_argument("--board-runner", default=None)
+    parser.add_argument("--vivado-settings-sh", default=None)
+    parser.add_argument("--hw-server-url", default=None)
+    parser.add_argument("--hw-server-bind", default=None)
     parser.add_argument("--device-index", type=int, default=0)
-    parser.add_argument("--program-jtag-freq-hz", type=int, default=10_000_000)
+    parser.add_argument("--program-jtag-freq-hz", type=int, default=30_000_000)
     parser.add_argument("--debug-jtag-freq-hz", type=int, default=10_000_000)
     parser.add_argument("--timeout-sec", type=int, default=10800)
     parser.add_argument("--poll-interval-sec", type=float, default=5.0)
     parser.add_argument("--stdout-max-chars", type=int, default=4096)
     parser.add_argument("--status-poll-count", type=int, default=1800)
     parser.add_argument("--status-poll-ms", type=int, default=1000)
+    parser.add_argument("--xdma-h2c-dev", default="/dev/xdma0_h2c_0", help="local-xdma H2C 设备")
+    parser.add_argument("--xdma-c2h-dev", default="/dev/xdma0_c2h_0", help="local-xdma C2H 设备")
+    parser.add_argument("--xdma-ctrl-dma-base", default="0x0", help="local-xdma DMA-control 基地址")
+    parser.add_argument("--xdma-bdf", default="0000:03:00.0", help="local-xdma PCIe BDF，用于预检")
+    parser.add_argument(
+        "--xdma-require-busy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="local-xdma 要求启动后观察到 Vortex busy/done",
+    )
+    parser.add_argument(
+        "--pcie-split-workaround",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="local-xdma 下启用两段 kernel workaround",
+    )
+    parser.add_argument(
+        "--xdma-checkpoint-stage",
+        type=int,
+        default=None,
+        help="local-xdma 单 kernel 调试：写入 guppy_runtime_pcie_split_stage 并回读 checkpoint 输出",
+    )
     parser.add_argument("--persistent-vivado-session", action="store_true")
     parser.add_argument("--resident-reload-all-kernel-segments", action="store_true")
 
@@ -384,8 +519,78 @@ def main() -> int:
         if args.platform_root
         else default_platform_root(repo_root).resolve()
     )
+    local_board_dir = args.platform_root / "hw" / "syn" / "xilinx" / "xc7k480t"
+    local_bit_default = (
+        local_board_dir
+        / "xc7k480t_vortex_m1"
+        / "xc7k480t_vortex_m1.runs"
+        / "impl_1"
+        / "xc7k480t_vortex_board_top.bit"
+    )
+    local_ltx_default = (
+        local_board_dir
+        / "xc7k480t_vortex_m1"
+        / "xc7k480t_vortex_m1.runs"
+        / "impl_1"
+        / "xc7k480t_vortex_board_top.ltx"
+    )
+    local_board_runner_default = local_board_dir / "run_regression_manifest_jtag.py"
+    local_xdma_runner_default = local_board_dir / "run_regression_manifest_xdma.py"
+    service_bit_default = (
+        "E:/fpga/repo/vx_xc7k480t_jtag_axi_20260405/"
+        "jtag_axi_build/jtag_axi_build.runs/impl_1/xc7k480t_vortex_board_top.bit"
+    )
+    service_ltx_default = (
+        "E:/fpga/repo/vx_xc7k480t_jtag_axi_20260405/"
+        "jtag_axi_build/jtag_axi_build.runs/impl_1/xc7k480t_vortex_board_top.ltx"
+    )
     if args.messages_json is not None:
         args.messages_json = resolve_repo_relative_path(repo_root, args.messages_json)
+
+    if args.runner_mode == "local-jtag":
+        args.bit_path = str(Path(args.bit_path).expanduser().resolve()) if args.bit_path else str(local_bit_default)
+        args.ltx_path = str(Path(args.ltx_path).expanduser().resolve()) if args.ltx_path else str(local_ltx_default)
+        args.board_scripts_dir = (
+            str(Path(args.board_scripts_dir).expanduser().resolve())
+            if args.board_scripts_dir
+            else str(local_board_dir)
+        )
+        args.board_runner = (
+            str(Path(args.board_runner).expanduser().resolve())
+            if args.board_runner
+            else str(local_board_runner_default)
+        )
+        args.vivado_settings_sh = (
+            str(Path(args.vivado_settings_sh).expanduser().resolve())
+            if args.vivado_settings_sh
+            else "/home/xiao/xilinx/2025.2/Vivado/settings64.sh"
+        )
+        args.hw_server_url = args.hw_server_url or "TCP:127.0.0.1:53121"
+        args.hw_server_bind = args.hw_server_bind or "TCP:127.0.0.1:53121"
+    elif args.runner_mode == "local-xdma":
+        args.bit_path = args.bit_path or ""
+        args.ltx_path = args.ltx_path or ""
+        args.board_scripts_dir = (
+            str(Path(args.board_scripts_dir).expanduser().resolve())
+            if args.board_scripts_dir
+            else str(local_board_dir)
+        )
+        args.board_runner = (
+            str(Path(args.board_runner).expanduser().resolve())
+            if args.board_runner
+            else str(local_xdma_runner_default)
+        )
+        args.vivado_settings_sh = args.vivado_settings_sh or ""
+        args.hw_server_url = args.hw_server_url or ""
+        args.hw_server_bind = args.hw_server_bind or ""
+    else:
+        args.bit_path = args.bit_path or service_bit_default
+        args.ltx_path = args.ltx_path or service_ltx_default
+        args.board_scripts_dir = args.board_scripts_dir or "E:/fpga/out"
+        args.board_runner = args.board_runner or str(local_board_runner_default)
+        args.vivado_settings_sh = args.vivado_settings_sh or "/home/xiao/xilinx/2025.2/Vivado/settings64.sh"
+        args.hw_server_url = args.hw_server_url or "TCP:localhost:3121"
+        args.hw_server_bind = args.hw_server_bind or "TCP:localhost:3121"
 
     ensure_assets(args, repo_root)
     ensure_bundle(args, repo_root)
@@ -404,7 +609,14 @@ def main() -> int:
     print(f"sequence_length: {sequence_length}")
     print(f"layer_limit: {layer_limit}")
     print(f"platform_root: {args.platform_root}")
+    print(f"runner_mode: {args.runner_mode}")
     print(f"service_url: {args.service_url}")
+    print(f"bit_path: {args.bit_path}")
+    print(f"ltx_path: {args.ltx_path}")
+    print(f"board_scripts_dir: {args.board_scripts_dir}")
+    print(f"board_runner: {args.board_runner}")
+    print(f"hw_server_url: {args.hw_server_url}")
+    print(f"hw_server_bind: {args.hw_server_bind}")
 
     ensure_stage(args, repo_root, sequence_length=sequence_length, layer_limit=layer_limit)
     ensure_build(args, repo_root)

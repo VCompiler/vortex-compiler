@@ -413,10 +413,16 @@ def gen_transformer_block_mlir(
     %c_head_dim = arith.constant {head_dim} : index
     %c_d_model = arith.constant {d_model} : index
     %c_two_d_model = arith.constant {2 * d_model} : index
+    %progress_20 = arith.constant 20 : i32
+    func.call @guppy_set_progress(%progress_20) : (i32) -> ()
 
 {emit_layernorm("%x_in", "%ln1_gamma", "%ln1_beta", "%x_ln", "%ln_mean", "%ln_var", seq_len, d_model, tag="ln1")}
+    %progress_21 = arith.constant 21 : i32
+    func.call @guppy_set_progress(%progress_21) : (i32) -> ()
 
 {emit_linear_with_bias("%x_ln", "%qkv_w", "%qkv_b", "%qkv", seq_len, three_dim, d_model, tag="qkv")}
+    %progress_22 = arith.constant 22 : i32
+    func.call @guppy_set_progress(%progress_22) : (i32) -> ()
 
     scf.for %h = %c0 to %c_heads step %c1 {{
       scf.for %i = %c0 to %c_seq step %c1 {{
@@ -433,6 +439,8 @@ def gen_transformer_block_mlir(
         }}
       }}
     }}
+    %progress_23 = arith.constant 23 : i32
+    func.call @guppy_set_progress(%progress_23) : (i32) -> ()
 
     linalg.fill ins(%zero : f32) outs(%score : memref<{n_heads}x{seq_len}x{seq_len}xf32>)
     linalg.generic {{
@@ -511,6 +519,8 @@ def gen_transformer_block_mlir(
       %norm_value = arith.divf %value_norm, %sum_norm : f32
       linalg.yield %norm_value : f32
     }}
+    %progress_24 = arith.constant 24 : i32
+    func.call @guppy_set_progress(%progress_24) : (i32) -> ()
 
     linalg.fill ins(%zero : f32) outs(%attn_heads : memref<{n_heads}x{seq_len}x{head_dim}xf32>)
     linalg.generic {{
@@ -525,6 +535,8 @@ def gen_transformer_block_mlir(
       %sum_attn = arith.addf %prod_attn, %acc_attn : f32
       linalg.yield %sum_attn : f32
     }}
+    %progress_25 = arith.constant 25 : i32
+    func.call @guppy_set_progress(%progress_25) : (i32) -> ()
 
     scf.for %h = %c0 to %c_heads step %c1 {{
       scf.for %i = %c0 to %c_seq step %c1 {{
@@ -535,6 +547,8 @@ def gen_transformer_block_mlir(
         }}
       }}
     }}
+
+    func.call @guppy_after_attn_merge() : () -> ()
 
 {emit_linear_with_bias("%attn_merge", "%attn_out_w", "%attn_out_b", "%attn_out", seq_len, d_model, d_model, tag="attn_out")}
 
@@ -549,8 +563,12 @@ def gen_transformer_block_mlir(
       %sum_res1 = arith.addf %lhs_res1, %rhs_res1 : f32
       linalg.yield %sum_res1 : f32
     }}
+    %progress_26 = arith.constant 26 : i32
+    func.call @guppy_set_progress(%progress_26) : (i32) -> ()
 
 {emit_layernorm("%x_out", "%ln2_gamma", "%ln2_beta", "%x_ln2", "%ln_mean", "%ln_var", seq_len, d_model, tag="ln2")}
+    %progress_27 = arith.constant 27 : i32
+    func.call @guppy_set_progress(%progress_27) : (i32) -> ()
 
 {emit_linear_with_bias("%x_ln2", "%ffn_up_w", "%ffn_up_b", "%hidden", seq_len, ffn_hidden, d_model, tag="ffn_up")}
 
@@ -564,6 +582,8 @@ def gen_transformer_block_mlir(
       %relu_value = arith.maximumf %relu_input, %zero : f32
       linalg.yield %relu_value : f32
     }}
+    %progress_28 = arith.constant 28 : i32
+    func.call @guppy_set_progress(%progress_28) : (i32) -> ()
 
 {emit_linear_with_bias("%hidden", "%ffn_down_w", "%ffn_down_b", "%attn_out", seq_len, d_model, ffn_hidden, tag="ffn_down")}
 
@@ -578,6 +598,9 @@ def gen_transformer_block_mlir(
       %sum_res2 = arith.addf %lhs_res2, %rhs_res2 : f32
       linalg.yield %sum_res2 : f32
     }}
+    %progress_29 = arith.constant 29 : i32
+    func.call @guppy_set_progress(%progress_29) : (i32) -> ()
+    func.call @guppy_after_transformer_block() : () -> ()
 
     return
   }}"""
@@ -598,8 +621,12 @@ def gen_lm_head_mlir(seq_len: int, d_model: int, vocab_size: int) -> str:
     %zero = arith.constant 0.0 : f32
     %eps = arith.constant 1.0e-5 : f32
     %inv_n = arith.constant {inv_n:.17g} : f32
+    %progress_40 = arith.constant 40 : i32
+    func.call @guppy_set_progress(%progress_40) : (i32) -> ()
 
 {emit_layernorm("%input", "%gamma", "%beta", "%ln_out", "%ln_mean", "%ln_var", seq_len, d_model, tag="lm")}
+    %progress_41 = arith.constant 41 : i32
+    func.call @guppy_set_progress(%progress_41) : (i32) -> ()
 
     linalg.fill ins(%zero : f32) outs(%logits : memref<{seq_len}x{vocab_size}xf32>)
     linalg.generic {{
@@ -614,6 +641,8 @@ def gen_lm_head_mlir(seq_len: int, d_model: int, vocab_size: int) -> str:
       %sum_lm = arith.addf %prod_lm, %acc_lm : f32
       linalg.yield %sum_lm : f32
     }}
+    %progress_42 = arith.constant 42 : i32
+    func.call @guppy_set_progress(%progress_42) : (i32) -> ()
 
     return
   }}"""
@@ -622,12 +651,26 @@ def gen_lm_head_mlir(seq_len: int, d_model: int, vocab_size: int) -> str:
 def gen_full_mlir(seq_len: int, d_model: int, ffn_hidden: int, vocab_size: int, n_heads: int) -> str:
     return f"""// Auto-generated Guppy full forward.
 module {{
+  func.func private @guppy_set_progress(i32)
+  func.func private @guppy_after_transformer_block()
+  func.func private @guppy_after_attn_merge()
+
 {gen_embedding_mlir(seq_len, d_model, vocab_size)}
 
 {gen_transformer_block_mlir(seq_len, d_model, ffn_hidden, n_heads)}
 
 {gen_lm_head_mlir(seq_len, d_model, vocab_size)}
 }}
+"""
+
+
+def gen_split_post_attn_mlir() -> str:
+    return """// Auto-generated Guppy PCIe split post-attention helper.
+module {
+  func.func @guppy_split_noop() attributes {vortex.entry} {
+    return
+  }
+}
 """
 
 
@@ -652,8 +695,108 @@ def write_blob(path: Path, arr: np.ndarray) -> None:
     arr.tofile(path)
 
 
-def gen_weights_asm(blobs: list[tuple[str, Path]]) -> str:
-    parts = ['    .text', '']
+def gen_weights_asm(
+    blobs: list[tuple[str, Path]],
+    *,
+    seq_len: int,
+    d_model: int,
+    ffn_hidden: int,
+    n_heads: int,
+    input_length: int,
+    default_expect_golden: int,
+    default_split_stage: int,
+) -> str:
+    head_dim = d_model // n_heads
+    hidden_bytes = seq_len * d_model * 4
+    qkv_bytes = seq_len * (3 * d_model) * 4
+    attn_tensor_bytes = n_heads * seq_len * head_dim * 4
+    score_bytes = n_heads * seq_len * seq_len * 4
+    ffn_hidden_bytes = seq_len * ffn_hidden * 4
+    scalar_seq_bytes = seq_len * 4
+    scalar_head_seq_bytes = n_heads * seq_len * 4
+    parts = [
+        '    .section .bss.guppy_runtime,"aw",@nobits',
+        '    .balign 16',
+        '    .global g_x_cur',
+        'g_x_cur:',
+        f'    .zero {hidden_bytes}',
+        '    .global g_x_next',
+        'g_x_next:',
+        f'    .zero {hidden_bytes}',
+        '    .global g_x_ln',
+        'g_x_ln:',
+        f'    .zero {hidden_bytes}',
+        '    .global g_qkv',
+        'g_qkv:',
+        f'    .zero {qkv_bytes}',
+        '    .global g_q',
+        'g_q:',
+        f'    .zero {attn_tensor_bytes}',
+        '    .global g_k',
+        'g_k:',
+        f'    .zero {attn_tensor_bytes}',
+        '    .global g_v',
+        'g_v:',
+        f'    .zero {attn_tensor_bytes}',
+        '    .global g_score',
+        'g_score:',
+        f'    .zero {score_bytes}',
+        '    .global g_prob',
+        'g_prob:',
+        f'    .zero {score_bytes}',
+        '    .global g_attn_heads',
+        'g_attn_heads:',
+        f'    .zero {attn_tensor_bytes}',
+        '    .global g_attn_merge',
+        'g_attn_merge:',
+        f'    .zero {hidden_bytes}',
+        '    .global g_attn_out',
+        'g_attn_out:',
+        f'    .zero {hidden_bytes}',
+        '    .global g_x_ln2',
+        'g_x_ln2:',
+        f'    .zero {hidden_bytes}',
+        '    .global g_hidden',
+        'g_hidden:',
+        f'    .zero {ffn_hidden_bytes}',
+        '    .global g_ln_mean',
+        'g_ln_mean:',
+        f'    .zero {scalar_seq_bytes}',
+        '    .global g_ln_var',
+        'g_ln_var:',
+        f'    .zero {scalar_seq_bytes}',
+        '    .global g_sm_max',
+        'g_sm_max:',
+        f'    .zero {scalar_head_seq_bytes}',
+        '    .global g_sm_sum',
+        'g_sm_sum:',
+        f'    .zero {scalar_head_seq_bytes}',
+        '',
+        '    .section .data.guppy_runtime,"aw",@progbits',
+        '    .balign 64',
+        '    .global guppy_runtime_prompt_length',
+        'guppy_runtime_prompt_length:',
+        f'    .word {input_length}',
+        '    .global guppy_runtime_expect_golden',
+        'guppy_runtime_expect_golden:',
+        f'    .word {default_expect_golden}',
+        '    .global guppy_runtime_pcie_split_stage',
+        'guppy_runtime_pcie_split_stage:',
+        f'    .word {default_split_stage}',
+        '    .global guppy_runtime_stage0_checkpoint',
+        'guppy_runtime_stage0_checkpoint:',
+        '    .word 0',
+        '    .global guppy_progress_stage',
+        'guppy_progress_stage:',
+        '    .word 0',
+        '    .global guppy_stage0_profile',
+        'guppy_stage0_profile:',
+        '    .zero 768',
+        '    .zero 48',
+        '',
+        '    .text',
+        '',
+    ]
     for label, path in blobs:
         parts.append(emit_incbin(label, path))
         parts.append("")
@@ -669,6 +812,8 @@ def gen_wrapper(
     n_heads: int,
     input_length: int,
     tolerance: float,
+    attn_out_thread_mode: str,
+    ffn_thread_mode: str,
 ) -> str:
     head_dim = d_model // n_heads
 
@@ -700,11 +845,13 @@ def gen_wrapper(
                 f"extern const float {tensor_symbol(f'{prefix}.{name}')}[{size}];"
             )
 
+    per_layer_helpers = []
     per_layer_calls = []
     for layer_idx in range(n_layers):
         prefix = f"blocks.{layer_idx}"
-        per_layer_calls.append(
+        per_layer_helpers.append(
             f"""\
+static __attribute__((noinline)) void guppy_run_block_{layer_idx}(void) {{
   transformer_block(
       g_x_cur, g_x_next,
       (float*){tensor_symbol(f"{prefix}.norm1.weight")},
@@ -722,9 +869,26 @@ def gen_wrapper(
       g_x_ln, g_qkv, g_q, g_k, g_v, g_score, g_prob, g_attn_heads,
       g_attn_merge, g_attn_out, g_x_ln2, g_hidden,
       g_ln_mean, g_ln_var, g_sm_max, g_sm_sum);
+}}"""
+        )
+        layer_copy = ""
+        if layer_idx + 1 < n_layers:
+            layer_copy = """\
 
   for (int i = 0; i < S * D; ++i)
     g_x_cur[i] = g_x_next[i];"""
+        split_exit = f"""\
+
+  if (guppy_is_control_lane() && guppy_runtime_pcie_split_stage == {layer_idx + 1}) {{
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    guppy_fast_exit(0);
+  }}"""
+        per_layer_calls.append(
+            f"""\
+  guppy_runtime_current_layer = {layer_idx};
+  guppy_run_block_{layer_idx}();
+  guppy_runtime_current_layer = -1;
+  guppy_control_progress({3 + layer_idx * 2});{split_exit}{layer_copy}"""
         )
 
     topk_code = """\
@@ -746,11 +910,306 @@ def gen_wrapper(
       best_idx = v;
     }
   }
-  guppy_output_last_token_argmax = best_idx;"""
+  guppy_output_last_token_argmax = best_idx;
+  guppy_control_progress(6);"""
+
+    final_hidden_expr = "g_x_next" if n_layers > 0 else "g_x_cur"
+    final_copy_code = ""
+    if n_layers > 0:
+        final_copy_code = """\
+  for (int i = 0; i < S * D; ++i)
+    g_x_cur[i] = g_x_next[i];
+
+"""
+
+    chat_fast_code = f"""\
+  if (!guppy_runtime_expect_golden) {{
+    int prompt_len = guppy_runtime_prompt_length;
+    if (prompt_len <= 0)
+      prompt_len = 1;
+    if (prompt_len > S)
+      prompt_len = S;
+    int last_token_index = prompt_len - 1;
+
+    (void)guppy_lm_head_one(
+        &{final_hidden_expr}[last_token_index * D],
+        (float*){tensor_symbol('norm.weight')},
+        (float*){tensor_symbol('norm.bias')},
+        (float*){tensor_symbol('tok_emb.weight')});
+
+    guppy_control_progress(6);
+    guppy_fast_exit(0);
+  }}
+
+"""
+
+    lm_head_one_code = """\
+static __attribute__((always_inline)) inline float guppy_sanitize_logit(float value) {
+  unsigned bits;
+  __asm__ volatile("fmv.x.w %0, %1" : "=r"(bits) : "f"(value));
+  unsigned mag = bits & 0x7fffffffu;
+  if (mag > 0x44800000u)
+    return -3.4028234663852886e38f;
+  return value;
+}
+
+static __attribute__((noinline)) int guppy_lm_head_one(
+    const float *input, const float *gamma, const float *beta,
+    const float *tok_table) {
+  guppy_set_progress(50);
+  float mean = 0.0f;
+  for (int j = 0; j < D; ++j)
+    mean += input[j];
+  mean *= 1.0f / (float)D;
+
+  float var = 0.0f;
+  for (int j = 0; j < D; ++j) {
+    float diff = input[j] - mean;
+    var += diff * diff;
+  }
+  var *= 1.0f / (float)D;
+
+  float inv_std = 1.0f / sqrtf(var + 1.0e-5f);
+  for (int j = 0; j < D; ++j)
+    g_lm_one_ln_out[j] = (input[j] - mean) * inv_std * gamma[j] + beta[j];
+
+  guppy_set_progress(51);
+  int best_idx = 0;
+  float best_val = 0.0f;
+  for (int v = 0; v < V; ++v) {
+    const float *row = tok_table + v * D;
+    float sum = 0.0f;
+    for (int j = 0; j < D; ++j)
+      sum += g_lm_one_ln_out[j] * row[j];
+    sum = guppy_sanitize_logit(sum);
+    guppy_output_last_token_logits[v] = sum;
+    if (v == 0 || sum > best_val) {
+      best_val = sum;
+      best_idx = v;
+    }
+  }
+  guppy_output_last_token_argmax = best_idx;
+  guppy_set_progress(52);
+  return best_idx;
+}
+"""
+
+    if attn_out_thread_mode == "warp4":
+        warp4_attn_out_globals = """\
+volatile int guppy_warp4_attn_out_num_threads = 1;
+volatile int guppy_warp4_attn_out_expected_mask = 1;
+volatile int guppy_warp4_attn_out_nonzero_mask = 1;
+volatile int guppy_warp4_attn_out_status = 0;
+volatile int guppy_warp4_attn_out_task_count[4] = {0, 0, 0, 0};
+volatile int guppy_warp4_attn_out_row = 0;
+const float * volatile guppy_warp4_attn_out_weight = 0;
+const float * volatile guppy_warp4_attn_out_bias = 0;
+"""
+        warp4_attn_out_helper = """\
+static __attribute__((always_inline)) inline void guppy_store_f32_bits(
+    float *addr, float value) {
+  unsigned bits;
+  __asm__ volatile("fmv.x.w %0, %1" : "=r"(bits) : "f"(value));
+  ((volatile unsigned*)addr)[0] = bits;
+}
+
+static void __attribute__((noinline)) guppy_attn_out_row_warp4_body(void) {
+  int tid = (int)guppy_thread_id();
+  int row = guppy_warp4_attn_out_row;
+  const float *weight = guppy_warp4_attn_out_weight;
+  const float *bias = guppy_warp4_attn_out_bias;
+  int lanes = guppy_warp4_attn_out_num_threads;
+  if (lanes <= 0)
+    lanes = 1;
+
+  for (int j = tid; j < D; j += lanes) {
+    float sum = bias[j];
+    for (int k = 0; k < D; ++k)
+      sum += g_attn_merge[row * D + k] * weight[j * D + k];
+    guppy_store_f32_bits(&g_attn_out[row * D + j], sum);
+    guppy_store_f32_bits(&g_x_next[row * D + j], g_x_cur[row * D + j] + sum);
+    guppy_warp4_attn_out_task_count[tid] += 1;
+  }
+}
+
+static void guppy_attn_out_row_warp4(
+    int row, const float *weight, const float *bias) {
+  int lanes = vx_num_threads();
+  if (lanes > 4)
+    lanes = 4;
+  if (lanes < 1)
+    lanes = 1;
+
+  guppy_warp4_attn_out_num_threads = lanes;
+  guppy_warp4_attn_out_expected_mask = (1 << lanes) - 1;
+  guppy_warp4_attn_out_nonzero_mask = 0;
+  guppy_warp4_attn_out_status = 0;
+  guppy_warp4_attn_out_task_count[0] = 0;
+  guppy_warp4_attn_out_task_count[1] = 0;
+  guppy_warp4_attn_out_task_count[2] = 0;
+  guppy_warp4_attn_out_task_count[3] = 0;
+  guppy_warp4_attn_out_row = row;
+  guppy_warp4_attn_out_weight = weight;
+  guppy_warp4_attn_out_bias = bias;
+
+  vx_fence();
+  vx_tmc(guppy_warp4_attn_out_expected_mask);
+  guppy_attn_out_row_warp4_body();
+  vx_fence();
+  vx_tmc_one();
+
+  int nonzero_mask = 0;
+  for (int i = 0; i < lanes; ++i) {
+    if (guppy_warp4_attn_out_task_count[i] != 0)
+      nonzero_mask |= 1 << i;
+  }
+  guppy_warp4_attn_out_nonzero_mask = nonzero_mask;
+  if (D >= lanes && nonzero_mask != guppy_warp4_attn_out_expected_mask)
+    guppy_warp4_attn_out_status = 1;
+  __asm__ volatile("fence rw, rw" ::: "memory");
+}
+"""
+        attn_out_row_code = f"""\
+  guppy_attn_out_row_warp4(
+      row,
+      (float*){tensor_symbol('blocks.0.attn.out.weight')},
+      (float*){tensor_symbol('blocks.0.attn.out.bias')});"""
+    else:
+        warp4_attn_out_globals = ""
+        warp4_attn_out_helper = ""
+        attn_out_row_code = f"""\
+  for (int j = 0; j < D; ++j) {{
+    float sum = {tensor_symbol('blocks.0.attn.out.bias')}[j];
+    for (int k = 0; k < D; ++k)
+      sum += g_attn_merge[row * D + k] *
+             {tensor_symbol('blocks.0.attn.out.weight')}[j * D + k];
+    g_attn_out[row * D + j] = sum;
+    g_x_next[row * D + j] = g_x_cur[row * D + j] + sum;
+  }}"""
+
+    if ffn_thread_mode == "warp4":
+        warp4_ffn_globals = """\
+volatile int guppy_warp4_ffn_num_threads = 1;
+volatile int guppy_warp4_ffn_row = 0;
+"""
+        warp4_ffn_helper = f"""\
+static __attribute__((always_inline)) inline void guppy_ffn_store_f32_bits(
+    float *addr, float value) {{
+  unsigned bits;
+  __asm__ volatile("fmv.x.w %0, %1" : "=r"(bits) : "f"(value));
+  ((volatile unsigned*)addr)[0] = bits;
+}}
+
+static __attribute__((always_inline)) inline void guppy_ffn_store_relu_f32_bits(
+    float *addr, float value) {{
+  unsigned bits;
+  unsigned keep_mask;
+  __asm__ volatile(
+      "fmv.x.w %[bits], %[value]\\n\\t"
+      "srai %[keep_mask], %[bits], 31\\n\\t"
+      "xori %[keep_mask], %[keep_mask], -1\\n\\t"
+      "and %[bits], %[bits], %[keep_mask]\\n\\t"
+      "sw %[bits], 0(%[addr])\\n\\t"
+      : [bits] "=&r"(bits), [keep_mask] "=&r"(keep_mask)
+      : [value] "f"(value), [addr] "r"(addr)
+      : "memory");
+}}
+
+static int guppy_warp4_ffn_lane_count(void) {{
+  int lanes = vx_num_threads();
+  if (lanes > 4)
+    lanes = 4;
+  if (lanes < 1)
+    lanes = 1;
+  return lanes;
+}}
+
+static void __attribute__((noinline)) guppy_ffn_up_row_warp4_body(void) {{
+  int tid = (int)guppy_thread_id();
+  int row = guppy_warp4_ffn_row;
+  int lanes = guppy_warp4_ffn_num_threads;
+  if (lanes <= 0)
+    lanes = 1;
+
+  for (int h = tid; h < FF; h += lanes) {{
+    float sum = {tensor_symbol('blocks.0.ffn.up.bias')}[h];
+    for (int j = 0; j < D; ++j)
+      sum += g_x_ln2[row * D + j] *
+             {tensor_symbol('blocks.0.ffn.up.weight')}[h * D + j];
+    guppy_ffn_store_relu_f32_bits(&g_hidden[row * FF + h], sum);
+  }}
+}}
+
+static void __attribute__((noinline)) guppy_ffn_down_row_warp4_body(void) {{
+  int tid = (int)guppy_thread_id();
+  int row = guppy_warp4_ffn_row;
+  int lanes = guppy_warp4_ffn_num_threads;
+  if (lanes <= 0)
+    lanes = 1;
+
+  for (int j = tid; j < D; j += lanes) {{
+    float sum = {tensor_symbol('blocks.0.ffn.down.bias')}[j];
+    for (int h = 0; h < FF; ++h)
+      sum += g_hidden[row * FF + h] *
+             {tensor_symbol('blocks.0.ffn.down.weight')}[j * FF + h];
+    guppy_ffn_store_f32_bits(&g_x_next[row * D + j], g_x_next[row * D + j] + sum);
+  }}
+}}
+
+static void guppy_ffn_up_row_warp4(int row) {{
+  int lanes = guppy_warp4_ffn_lane_count();
+  guppy_warp4_ffn_num_threads = lanes;
+  guppy_warp4_ffn_row = row;
+  vx_fence();
+  vx_tmc((1 << lanes) - 1);
+  guppy_ffn_up_row_warp4_body();
+  vx_fence();
+  vx_tmc_one();
+  __asm__ volatile("fence rw, rw" ::: "memory");
+}}
+
+static void guppy_ffn_down_row_warp4(int row) {{
+  int lanes = guppy_warp4_ffn_lane_count();
+  guppy_warp4_ffn_num_threads = lanes;
+  guppy_warp4_ffn_row = row;
+  vx_fence();
+  vx_tmc((1 << lanes) - 1);
+  guppy_ffn_down_row_warp4_body();
+  vx_fence();
+  vx_tmc_one();
+  __asm__ volatile("fence rw, rw" ::: "memory");
+}}
+"""
+        ffn_up_row_code = "  guppy_ffn_up_row_warp4(row);"
+        ffn_down_row_code = "  guppy_ffn_down_row_warp4(row);"
+    else:
+        warp4_ffn_globals = ""
+        warp4_ffn_helper = ""
+        ffn_up_row_code = f"""\
+  for (int h = 0; h < FF; ++h) {{
+    float sum = {tensor_symbol('blocks.0.ffn.up.bias')}[h];
+    for (int j = 0; j < D; ++j)
+      sum += g_x_ln2[row * D + j] *
+             {tensor_symbol('blocks.0.ffn.up.weight')}[h * D + j];
+    if (sum < 0.0f)
+      sum = 0.0f;
+    g_hidden[row * FF + h] = sum;
+  }}"""
+        ffn_down_row_code = f"""\
+  for (int j = 0; j < D; ++j) {{
+    float sum = {tensor_symbol('blocks.0.ffn.down.bias')}[j];
+    for (int h = 0; h < FF; ++h)
+      sum += g_hidden[row * FF + h] *
+             {tensor_symbol('blocks.0.ffn.down.weight')}[j * FF + h];
+    g_x_next[row * D + j] += sum;
+  }}"""
 
     return f"""\
 #include <vx_intrinsics.h>
+#include <vx_spawn.h>
 #include <vx_print.h>
+#include <vortex/Runtime/BoardXDMAABI.h>
+#include <math.h>
 
 extern void embedding(int *token_ids, float *tok_table, float *pos_table, float *output);
 extern void transformer_block(
@@ -778,47 +1237,502 @@ extern void lm_head(
 #define PROMPT_LEN {input_length}
 #define TOLERANCE {tolerance:.8e}f
 
+#if defined(__clang__)
+#define GUPPY_WRAPPER_O0 __attribute__((optnone))
+#elif defined(__GNUC__)
+#define GUPPY_WRAPPER_O0 __attribute__((optimize("O0")))
+#else
+#define GUPPY_WRAPPER_O0
+#endif
+
+static __attribute__((always_inline)) inline unsigned guppy_thread_id(void) {{
+  unsigned value;
+  __asm__ volatile("csrr %0, %1" : "=r"(value) : "i"(0xCC0));
+  return value;
+}}
+
+static __attribute__((always_inline)) inline unsigned guppy_warp_id(void) {{
+  unsigned value;
+  __asm__ volatile("csrr %0, %1" : "=r"(value) : "i"(0xCC1));
+  return value;
+}}
+
+static __attribute__((always_inline)) inline unsigned guppy_core_id(void) {{
+  unsigned value;
+  __asm__ volatile("csrr %0, %1" : "=r"(value) : "i"(0xCC2));
+  return value;
+}}
+
+static __attribute__((always_inline)) inline int guppy_is_primary_lane(void) {{
+  return guppy_thread_id() == 0 && guppy_warp_id() == 0;
+}}
+
+static __attribute__((always_inline)) inline int guppy_is_control_lane(void) {{
+  return guppy_is_primary_lane() && guppy_core_id() == 0;
+}}
+
 {os.linesep.join(weight_decls)}
 
-static float g_x_cur[S * D];
-static float g_x_next[S * D];
-static float g_x_ln[S * D];
-static float g_qkv[S * (3 * D)];
-static float g_q[H * S * HD];
-static float g_k[H * S * HD];
-static float g_v[H * S * HD];
-static float g_score[H * S * S];
-static float g_prob[H * S * S];
-static float g_attn_heads[H * S * HD];
-static float g_attn_merge[S * D];
-static float g_attn_out[S * D];
-static float g_x_ln2[S * D];
-static float g_hidden[S * FF];
-static float g_ln_mean[S];
-static float g_ln_var[S];
-static float g_sm_max[H * S];
-static float g_sm_sum[H * S];
-volatile int guppy_runtime_prompt_length = PROMPT_LEN;
-volatile int guppy_runtime_expect_golden = 1;
+extern float g_x_cur[S * D];
+extern float g_x_next[S * D];
+extern float g_x_ln[S * D];
+extern float g_qkv[S * (3 * D)];
+extern float g_q[H * S * HD];
+extern float g_k[H * S * HD];
+extern float g_v[H * S * HD];
+extern float g_score[H * S * S];
+extern float g_prob[H * S * S];
+extern float g_attn_heads[H * S * HD];
+extern float g_attn_merge[S * D];
+extern float g_attn_out[S * D];
+extern float g_x_ln2[S * D];
+extern float g_hidden[S * FF];
+extern float g_ln_mean[S];
+extern float g_ln_var[S];
+extern float g_sm_max[H * S];
+extern float g_sm_sum[H * S];
+extern volatile int guppy_runtime_prompt_length;
+extern volatile int guppy_runtime_expect_golden;
+extern volatile int guppy_runtime_pcie_split_stage;
+extern volatile int guppy_runtime_stage0_checkpoint;
 float guppy_output_logits[S * V];
 float guppy_output_last_token_logits[V];
 int guppy_output_last_token_argmax = -1;
+extern volatile int guppy_progress_stage;
+extern volatile unsigned guppy_stage0_profile[192];
+static volatile int guppy_runtime_current_layer = -1;
+static volatile int guppy_after_attn_merge_done = 0;
+static float g_lm_one_ln_out[D];
 static float g_lm_ln_out[S * D];
 static float g_lm_ln_mean[S];
 static float g_lm_ln_var[S];
+{warp4_attn_out_globals}
+{warp4_ffn_globals}
+
+static __attribute__((always_inline)) inline void guppy_control_progress(int value) {{
+  if (guppy_is_control_lane())
+    guppy_progress_stage = value;
+}}
+
+static __attribute__((always_inline)) inline void guppy_host_visible_fence(void) {{
+  vortex_board_xdma_host_visible_fence();
+}}
+
+static __attribute__((always_inline)) inline unsigned guppy_read_mcycle_lo(void) {{
+  unsigned value;
+  __asm__ volatile("csrr %0, %1" : "=r"(value) : "i"(0xB00));
+  return value;
+}}
+
+static __attribute__((always_inline)) inline unsigned guppy_read_mcycle_hi(void) {{
+  unsigned value;
+  __asm__ volatile("csrr %0, %1" : "=r"(value) : "i"(0xB80));
+  return value;
+}}
+
+static void guppy_stage0_profile_reset(void) {{
+  if (!guppy_is_control_lane())
+    return;
+  guppy_stage0_profile[0] = 0x47505330u;
+  guppy_stage0_profile[1] = 13;
+  guppy_stage0_profile[2] = 4;
+  guppy_stage0_profile[3] = 0;
+  guppy_host_visible_fence();
+}}
+
+static __attribute__((always_inline)) inline unsigned guppy_stage0_profile_info(
+    int lane) {{
+  return ((unsigned)guppy_progress_stage & 0xffu) |
+         (((unsigned)lane & 0xffu) << 8) |
+         ((guppy_thread_id() & 0xffu) << 16) |
+         ((guppy_warp_id() & 0x0fu) << 24) |
+         ((guppy_core_id() & 0x0fu) << 28);
+}}
+
+static __attribute__((always_inline)) inline int guppy_stage0_profile_base(
+    int slot) {{
+  if (slot < 8)
+    return 96 + slot * 4;
+  if (slot == 8)
+    return 84;
+  return 128 + (slot - 9) * 4;
+}}
+
+static __attribute__((always_inline)) inline void guppy_stage0_profile_mark(
+    int slot, unsigned code, int lane) {{
+  if (slot < 0 || slot >= 15)
+    return;
+  const int base = guppy_stage0_profile_base(slot);
+  const unsigned hi = guppy_read_mcycle_hi();
+  const unsigned lo = guppy_read_mcycle_lo();
+  guppy_stage0_profile[base + 0] = code;
+  guppy_stage0_profile[base + 1] = lo;
+  guppy_stage0_profile[base + 2] = hi;
+  guppy_stage0_profile[base + 3] = guppy_stage0_profile_info(lane);
+  if ((unsigned)(slot + 1) > guppy_stage0_profile[1])
+    guppy_stage0_profile[1] = (unsigned)(slot + 1);
+  guppy_host_visible_fence();
+}}
+
+static __attribute__((noreturn)) void guppy_fast_exit(int status) {{
+  vortex_board_xdma_exit_if(status, guppy_is_control_lane());
+}}
+
+static __attribute__((noreturn)) void guppy_stage0_fast_exit(int status, int lane) {{
+  vortex_board_xdma_exit_if(status, lane == 0);
+}}
+
+static __attribute__((always_inline)) inline void guppy_stage0_checkpoint(
+    int code, int lane) {{
+  if (guppy_runtime_stage0_checkpoint == code) {{
+    if (lane == 0) {{
+      guppy_progress_stage = code;
+      guppy_host_visible_fence();
+    }}
+    guppy_stage0_fast_exit(0, lane);
+  }}
+}}
+
+void guppy_set_progress(int value) {{
+  guppy_control_progress(value);
+  if (guppy_is_control_lane() &&
+      !guppy_runtime_expect_golden && guppy_runtime_pcie_split_stage == value) {{
+    guppy_host_visible_fence();
+    guppy_fast_exit(0);
+  }}
+}}
+
+static void guppy_split_stage0_attn_merge_kernel(void *arg) {{
+  (void)arg;
+  const int lane = threadIdx.x;
+  const int lanes = blockDim.x;
+
+  if (lane >= 0 && lane < 4)
+    guppy_stage0_profile_mark(9 + lane, 100u + (unsigned)lane, lane);
+  if (lane == 0) {{
+    guppy_control_progress(1);
+    guppy_stage0_profile_mark(0, 1, lane);
+  }}
+  guppy_stage0_checkpoint(1, lane);
+  for (int task = lane; task < S * D; task += lanes) {{
+    const int row = task / D;
+    const int col = task - row * D;
+    const int token = guppy_input_token_ids[row];
+    g_x_cur[task] =
+        guppy_tok_emb_weight[token * D + col] + guppy_pos_emb_weight[task];
+  }}
+  __syncthreads();
+  if (lane == 0)
+    guppy_stage0_profile_mark(1, 20, lane);
+
+  if (lane == 0) {{
+    guppy_control_progress(20);
+  }}
+  guppy_stage0_checkpoint(20, lane);
+  for (int row = lane; row < S; row += lanes) {{
+    float mean = 0.0f;
+    for (int col = 0; col < D; ++col)
+      mean += g_x_cur[row * D + col];
+    mean *= 1.0f / (float)D;
+
+    float var = 0.0f;
+    for (int col = 0; col < D; ++col) {{
+      float diff = g_x_cur[row * D + col] - mean;
+      var += diff * diff;
+    }}
+    var *= 1.0f / (float)D;
+    const float inv_std = 1.0f / sqrtf(var + 1.0e-5f);
+    g_ln_mean[row] = mean;
+    g_ln_var[row] = var;
+    for (int col = 0; col < D; ++col) {{
+      g_x_ln[row * D + col] =
+          (g_x_cur[row * D + col] - mean) * inv_std *
+              guppy_blocks_0_norm1_weight[col] +
+          guppy_blocks_0_norm1_bias[col];
+    }}
+  }}
+  __syncthreads();
+  if (lane == 0)
+    guppy_stage0_profile_mark(2, 21, lane);
+
+  if (lane == 0) {{
+    guppy_control_progress(21);
+  }}
+  guppy_stage0_checkpoint(21, lane);
+  for (int task = lane; task < S * (3 * D); task += lanes) {{
+    const int row = task / (3 * D);
+    const int out_col = task - row * (3 * D);
+    float sum = guppy_blocks_0_attn_qkv_bias[out_col];
+    const float *weight_row = &guppy_blocks_0_attn_qkv_weight[out_col * D];
+    const float *input_row = &g_x_ln[row * D];
+    for (int k = 0; k < D; ++k)
+      sum += input_row[k] * weight_row[k];
+    g_qkv[task] = sum;
+  }}
+  __syncthreads();
+  if (lane == 0)
+    guppy_stage0_profile_mark(3, 22, lane);
+
+  if (lane == 0) {{
+    guppy_control_progress(22);
+  }}
+  guppy_stage0_checkpoint(22, lane);
+  for (int task = lane; task < H * S * HD; task += lanes) {{
+    const int d = task % HD;
+    const int tmp = task / HD;
+    const int row = tmp % S;
+    const int head = tmp / S;
+    const int flat = head * HD + d;
+    g_q[task] = g_qkv[row * (3 * D) + flat];
+    g_k[task] = g_qkv[row * (3 * D) + D + flat];
+    g_v[task] = g_qkv[row * (3 * D) + 2 * D + flat];
+  }}
+  __syncthreads();
+  if (lane == 0)
+    guppy_stage0_profile_mark(4, 23, lane);
+
+  if (lane == 0) {{
+    guppy_control_progress(23);
+  }}
+  guppy_stage0_checkpoint(23, lane);
+  const float scale = {1.0 / math.sqrt(head_dim):.17g}f;
+  const unsigned neg_inf_bits = 0xff800000u;
+  for (int head = 0; head < H; ++head) {{
+    for (int row = 0; row < S; ++row) {{
+      float mx = -__builtin_inff();
+      for (int col = 0; col < S; ++col) {{
+        float acc = 0.0f;
+        for (int d = 0; d < HD; ++d) {{
+          acc += g_q[(head * S + row) * HD + d] *
+                 g_k[(head * S + col) * HD + d];
+        }}
+        float raw_score = acc * scale;
+        unsigned raw_bits;
+        __asm__ volatile("fmv.x.w %0, %1" : "=r"(raw_bits) : "f"(raw_score));
+        const unsigned keep_mask = 0u - (unsigned)(col <= row);
+        const unsigned score_bits =
+            (raw_bits & keep_mask) | (neg_inf_bits & ~keep_mask);
+        float score;
+        __asm__ volatile("fmv.w.x %0, %1" : "=f"(score) : "r"(score_bits));
+        g_score[(head * S + row) * S + col] = score;
+        mx = fmaxf(mx, score);
+      }}
+      g_sm_max[head * S + row] = mx;
+
+      float denom = 0.0f;
+      for (int col = 0; col < S; ++col) {{
+        float p = expf(g_score[(head * S + row) * S + col] - mx);
+        g_prob[(head * S + row) * S + col] = p;
+        denom += p;
+      }}
+      g_sm_sum[head * S + row] = denom;
+      for (int col = 0; col < S; ++col)
+        g_prob[(head * S + row) * S + col] /= denom;
+    }}
+  }}
+  __syncthreads();
+  if (lane == 0)
+    guppy_stage0_profile_mark(5, 24, lane);
+
+  if (lane == 0) {{
+    guppy_control_progress(24);
+  }}
+  guppy_stage0_checkpoint(24, lane);
+  for (int task = lane; task < H * S * HD; task += lanes) {{
+    const int d = task % HD;
+    const int tmp = task / HD;
+    const int row = tmp % S;
+    const int head = tmp / S;
+    float acc = 0.0f;
+    for (int col = 0; col < S; ++col) {{
+      acc += g_prob[(head * S + row) * S + col] *
+             g_v[(head * S + col) * HD + d];
+    }}
+    g_attn_heads[task] = acc;
+  }}
+  __syncthreads();
+  if (lane == 0)
+    guppy_stage0_profile_mark(6, 25, lane);
+
+  if (lane == 0) {{
+    guppy_control_progress(25);
+  }}
+  guppy_stage0_checkpoint(25, lane);
+  for (int task = lane; task < H * S * HD; task += lanes) {{
+    const int d = task % HD;
+    const int tmp = task / HD;
+    const int row = tmp % S;
+    const int head = tmp / S;
+    g_attn_merge[row * D + head * HD + d] = g_attn_heads[task];
+  }}
+  __syncthreads();
+  if (lane == 0)
+    guppy_stage0_profile_mark(7, 240, lane);
+  guppy_stage0_checkpoint(240, lane);
+}}
+
+static __attribute__((noinline)) void guppy_run_split_stage0_attn_merge(void) {{
+  guppy_stage0_profile_reset();
+  uint32_t grid_dim = 1;
+  uint32_t block_dim = 4;
+  int rc = vx_spawn_threads(
+      1, &grid_dim, &block_dim,
+      (vx_kernel_func_cb)guppy_split_stage0_attn_merge_kernel, 0);
+  if (rc != 0) {{
+    guppy_control_progress(239);
+    guppy_fast_exit(1);
+  }}
+  guppy_control_progress(240);
+  guppy_stage0_profile_mark(8, 241, -1);
+  guppy_host_visible_fence();
+  guppy_fast_exit(0);
+}}
+
+{os.linesep.join(per_layer_helpers)}
+
+{warp4_attn_out_helper}
+{warp4_ffn_helper}
+
+{lm_head_one_code}
+
+void __attribute__((noinline)) guppy_after_attn_merge(void) {{
+  if (guppy_runtime_expect_golden)
+    return;
+  if ({n_layers} != 1) {{
+    if (guppy_is_control_lane() && guppy_runtime_pcie_split_stage == 1) {{
+      guppy_control_progress(240);
+      __asm__ volatile("fence rw, rw" ::: "memory");
+      guppy_fast_exit(0);
+    }}
+    return;
+  }}
+
+  if (!guppy_is_primary_lane()) {{
+    while (!guppy_after_attn_merge_done) {{
+    }}
+    return;
+  }}
+  if (!guppy_is_control_lane())
+    return;
+
+  if (guppy_runtime_pcie_split_stage == 1) {{
+    guppy_control_progress(240);
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    guppy_fast_exit(0);
+  }}
+
+  int prompt_len = guppy_runtime_prompt_length;
+  if (prompt_len <= 0)
+    prompt_len = 1;
+  if (prompt_len > S)
+    prompt_len = S;
+  int row = prompt_len - 1;
+
+  guppy_set_progress(251);
+{attn_out_row_code}
+
+  guppy_set_progress(252);
+  float mean = 0.0f;
+  for (int j = 0; j < D; ++j)
+    mean += g_x_next[row * D + j];
+  mean *= 1.0f / (float)D;
+
+  float var = 0.0f;
+  for (int j = 0; j < D; ++j) {{
+    float diff = g_x_next[row * D + j] - mean;
+    var += diff * diff;
+  }}
+  var *= 1.0f / (float)D;
+
+  float inv_std = 1.0f / sqrtf(var + 1.0e-5f);
+  for (int j = 0; j < D; ++j)
+    g_x_ln2[row * D + j] =
+        (g_x_next[row * D + j] - mean) * inv_std *
+            {tensor_symbol('blocks.0.norm2.weight')}[j] +
+        {tensor_symbol('blocks.0.norm2.bias')}[j];
+
+  guppy_set_progress(253);
+{ffn_up_row_code}
+
+  guppy_set_progress(254);
+{ffn_down_row_code}
+
+  guppy_set_progress(255);
+  (void)guppy_lm_head_one(
+      &g_x_next[row * D],
+      (float*){tensor_symbol('norm.weight')},
+      (float*){tensor_symbol('norm.bias')},
+      (float*){tensor_symbol('tok_emb.weight')});
+
+  guppy_after_attn_merge_done = 1;
+  __asm__ volatile("fence rw, rw" ::: "memory");
+  guppy_control_progress(6);
+  guppy_fast_exit(0);
+}}
+
+void guppy_after_transformer_block(void) {{
+  if (guppy_runtime_expect_golden)
+    return;
+  if ({n_layers} != 1) {{
+    if (guppy_is_control_lane() &&
+        guppy_runtime_pcie_split_stage > 0 &&
+        guppy_runtime_pcie_split_stage == guppy_runtime_current_layer + 1) {{
+      __asm__ volatile("fence rw, rw" ::: "memory");
+      guppy_fast_exit(0);
+    }}
+    return;
+  }}
+
+  int prompt_len = guppy_runtime_prompt_length;
+  if (prompt_len <= 0)
+    prompt_len = 1;
+  if (prompt_len > S)
+    prompt_len = S;
+  int last_token_index = prompt_len - 1;
+
+  (void)guppy_lm_head_one(
+      &g_x_next[last_token_index * D],
+      (float*){tensor_symbol('norm.weight')},
+      (float*){tensor_symbol('norm.bias')},
+      (float*){tensor_symbol('tok_emb.weight')});
+
+  guppy_control_progress(6);
+  guppy_fast_exit(0);
+}}
 
 int main() {{
-  if (vx_thread_id() != 0 || vx_warp_id() != 0 || vx_core_id() != 0)
+  if (!guppy_runtime_expect_golden &&
+      guppy_runtime_pcie_split_stage == 1) {{
+    guppy_run_split_stage0_attn_merge();
+  }}
+
+  if (!guppy_is_primary_lane())
+    return 0;
+  if (!guppy_is_control_lane())
     return 0;
 
+  if (!guppy_runtime_expect_golden && guppy_runtime_pcie_split_stage == 101) {{
+    guppy_control_progress(101);
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    guppy_fast_exit(0);
+  }}
+
+  guppy_control_progress(1);
   embedding(
       (int*){tensor_symbol('input.token_ids')},
       (float*){tensor_symbol('tok_emb.weight')},
       (float*){tensor_symbol('pos_emb.weight')},
       g_x_cur);
 
+  guppy_control_progress(2);
+  if (!guppy_runtime_expect_golden && guppy_runtime_pcie_split_stage == 2) {{
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    guppy_fast_exit(0);
+  }}
 {os.linesep.join(per_layer_calls)}
 
+{chat_fast_code}{final_copy_code}
+  guppy_control_progress(4);
   lm_head(
       g_x_cur,
       (float*){tensor_symbol('norm.weight')},
@@ -827,6 +1741,7 @@ int main() {{
       guppy_output_logits,
       g_lm_ln_out, g_lm_ln_mean, g_lm_ln_var);
 
+  guppy_control_progress(5);
   int pass = 1;
   float max_diff = 0.0f;
   if (guppy_runtime_expect_golden) {{
@@ -844,8 +1759,6 @@ int main() {{
 {topk_code}
 
   if (!guppy_runtime_expect_golden) {{
-    vx_printf("guppy_next_token prompt_len=%d next_token=%d\\n",
-              prompt_len, best_idx);
     return 0;
   }}
 
@@ -864,6 +1777,78 @@ int main() {{
 """
 
 
+def gen_split_post_attn_wrapper(
+    seq_len: int,
+    d_model: int,
+    ffn_hidden: int,
+    vocab_size: int,
+    n_heads: int,
+    input_length: int,
+) -> str:
+    del ffn_hidden, n_heads
+    return f"""\
+#include <vx_intrinsics.h>
+
+#define S {seq_len}
+#define D {d_model}
+#define V {vocab_size}
+#define PROMPT_LEN {input_length}
+
+static __attribute__((always_inline)) inline unsigned guppy_thread_id(void) {{
+  unsigned value;
+  __asm__ volatile("csrr %0, %1" : "=r"(value) : "i"(0xCC0));
+  return value;
+}}
+
+static __attribute__((always_inline)) inline unsigned guppy_warp_id(void) {{
+  unsigned value;
+  __asm__ volatile("csrr %0, %1" : "=r"(value) : "i"(0xCC1));
+  return value;
+}}
+
+static __attribute__((always_inline)) inline unsigned guppy_core_id(void) {{
+  unsigned value;
+  __asm__ volatile("csrr %0, %1" : "=r"(value) : "i"(0xCC2));
+  return value;
+}}
+
+static __attribute__((always_inline)) inline int guppy_is_primary_lane(void) {{
+  return guppy_thread_id() == 0 && guppy_warp_id() == 0;
+}}
+
+static __attribute__((always_inline)) inline int guppy_is_control_lane(void) {{
+  return guppy_is_primary_lane() && guppy_core_id() == 0;
+}}
+
+int guppy_split_input_token_ids[S];
+float guppy_split_attn_merge_row[D];
+static volatile int guppy_runtime_prompt_length = PROMPT_LEN;
+static volatile int guppy_runtime_expect_golden = 0;
+static volatile int guppy_progress_stage = 0;
+int guppy_split_host_argmax = -1;
+int guppy_output_last_token_argmax = -1;
+
+static __attribute__((always_inline)) inline void guppy_control_progress(int value) {{
+  if (guppy_is_control_lane())
+    guppy_progress_stage = value;
+}}
+
+int main() {{
+  if (!guppy_is_primary_lane())
+    return 0;
+  if (!guppy_is_control_lane())
+    return 0;
+
+  guppy_control_progress(250);
+  guppy_output_last_token_argmax = guppy_split_host_argmax;
+
+  guppy_control_progress(6);
+  __asm__ volatile("fence rw, rw" ::: "memory");
+  return 0;
+}}
+"""
+
+
 def write_outputs(
     out_dir: Path,
     mlir_text: str,
@@ -877,6 +1862,14 @@ def write_outputs(
     (out_dir / "full_inference_manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
     )
+    split_mlir = manifest.get("pcie_split_post_attn_mlir")
+    split_wrapper = manifest.get("pcie_split_post_attn_wrapper")
+    if split_mlir and split_wrapper:
+        (out_dir / split_mlir).write_text(manifest.pop("_split_mlir_text"))
+        (out_dir / split_wrapper).write_text(manifest.pop("_split_wrapper_text"))
+        (out_dir / "full_inference_manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+        )
 
 
 def main() -> int:
@@ -911,6 +1904,27 @@ def main() -> int:
         default=None,
         help="仅生成前 N 层，默认使用全部层数",
     )
+    parser.add_argument(
+        "--pcie-default-split-stage",
+        type=int,
+        default=None,
+        help=(
+            "默认写入 guppy_runtime_pcie_split_stage 的值。"
+            "不指定时 layer_limit>1 使用 1，否则使用 0。"
+        ),
+    )
+    parser.add_argument(
+        "--attn-out-thread-mode",
+        choices=("serial", "warp4"),
+        default="serial",
+        help="blocks.0.attn.out 单行 projection 的线程调度模式。",
+    )
+    parser.add_argument(
+        "--ffn-thread-mode",
+        choices=("serial", "warp4"),
+        default="serial",
+        help="blocks.0 FFN up/down 单行 projection 的线程调度模式。",
+    )
     args = parser.parse_args()
 
     bundle_dir = Path(args.bundle_dir).expanduser().resolve()
@@ -930,6 +1944,11 @@ def main() -> int:
         raise ValueError(
             f"layer-limit 必须在 1..{cfg['n_layers']} 之间，当前是 {layer_limit}"
         )
+    default_split_stage = (
+        int(args.pcie_default_split_stage)
+        if args.pcie_default_split_stage is not None
+        else (1 if layer_limit > 1 else 0)
+    )
 
     golden_logits, assets = build_reference(bundle, seq_len, layer_limit)
 
@@ -949,6 +1968,17 @@ def main() -> int:
         int(cfg["n_heads"]),
         int(assets["input_length"]),
         args.tolerance,
+        args.attn_out_thread_mode,
+        args.ffn_thread_mode,
+    )
+    split_mlir_text = gen_split_post_attn_mlir()
+    split_wrapper_text = gen_split_post_attn_wrapper(
+        seq_len,
+        int(cfg["d_model"]),
+        int(cfg["ffn_hidden"]),
+        int(cfg["vocab_size"]),
+        int(cfg["n_heads"]),
+        int(assets["input_length"]),
     )
 
     blobs: list[tuple[str, Path]] = []
@@ -970,7 +2000,16 @@ def main() -> int:
         for key, value in layer.items():
             add_blob(tensor_symbol(f"{prefix}.{key}"), value.astype(np.float32))
 
-    asm_text = gen_weights_asm(blobs)
+    asm_text = gen_weights_asm(
+        blobs,
+        seq_len=seq_len,
+        d_model=int(cfg["d_model"]),
+        ffn_hidden=int(cfg["ffn_hidden"]),
+        n_heads=int(cfg["n_heads"]),
+        input_length=int(assets["input_length"]),
+        default_expect_golden=0 if layer_limit > 1 else 1,
+        default_split_stage=default_split_stage,
+    )
 
     manifest = {
         "schema_version": 1,
@@ -980,12 +2019,20 @@ def main() -> int:
         "layer_limit": layer_limit,
         "prompt_length": int(assets["input_length"]),
         "tolerance": args.tolerance,
+        "attn_out_thread_mode": args.attn_out_thread_mode,
+        "ffn_thread_mode": args.ffn_thread_mode,
+        "pcie_default_split_stage": default_split_stage,
         "mlir": "full_inference.mlir",
         "wrapper": "full_inference_wrapper.c",
         "weights_asm": "full_inference_weights.S",
+        "pcie_split_post_attn_mlir": "split_post_attn.mlir",
+        "pcie_split_post_attn_wrapper": "split_post_attn_wrapper.c",
+        "pcie_split_post_attn_out_dir": "out_split_post_attn",
         "blob_count": len(blobs),
         "golden_logits_shape": list(golden_logits.shape),
         "next_token_argmax": int(np.argmax(golden_logits[int(assets["input_length"]) - 1])),
+        "_split_mlir_text": split_mlir_text,
+        "_split_wrapper_text": split_wrapper_text,
     }
 
     write_outputs(out_dir, mlir_text, wrapper_text, asm_text, manifest)

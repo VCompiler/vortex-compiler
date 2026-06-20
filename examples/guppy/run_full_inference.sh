@@ -5,7 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 DIR="${1:?Usage: $0 <out-dir>}"
 DIR="$(cd "$DIR" && pwd -P)"
 
-PIPELINE='builtin.module(func.func(vortex-mark-kernel{remove-entry-attr=1},vortex-lower-linalg-inside-kernel),canonicalize,cse,vortex-legalize-for-llvm,vortex-lower-runtime-builtins,canonicalize,cse,convert-scf-to-cf,convert-math-to-llvm,convert-math-to-libm,convert-arith-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,convert-func-to-llvm{use-bare-ptr-memref-call-conv=1},convert-cf-to-llvm,reconcile-unrealized-casts)'
+PIPELINE='builtin.module(func.func(vortex-mark-kernel{remove-entry-attr=1},vortex-fuse-linear-with-bias,vortex-lower-linalg-inside-kernel),canonicalize,cse,vortex-legalize-for-llvm,vortex-lower-runtime-builtins,canonicalize,cse,convert-scf-to-cf,convert-math-to-llvm,convert-math-to-libm,convert-arith-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,convert-func-to-llvm{use-bare-ptr-memref-call-conv=1},convert-cf-to-llvm,reconcile-unrealized-casts)'
 
 PLATFORM_ROOT="${VORTEX_PLATFORM_ROOT:-/home/user/vortex-platform}"
 VX_OPT_BIN="${VX_OPT_BIN:-${REPO_ROOT}/build/bin/vx-opt}"
@@ -23,6 +23,7 @@ OUTDIR="${DIR}/out"
 [[ -x "${SIMX_BIN}" ]] || { echo "error: missing simx ${SIMX_BIN}" >&2; exit 1; }
 
 "${REPO_ROOT}/scripts/build-vortex-kernel.sh" \
+  --board-xdma-abi \
   --input "${MLIR}" \
   --output-dir "${OUTDIR}" \
   --platform-root "${PLATFORM_ROOT}" \

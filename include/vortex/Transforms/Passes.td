@@ -276,6 +276,39 @@ def LowerVortexRuntimeBuiltins
   }];
 }
 
+def MaterializeBoardXDMAEntry
+    : Pass<"vortex-materialize-board-xdma-entry", "::mlir::ModuleOp"> {
+  let summary = "Generate a board/XDMA main entry wrapper for a lowered Vortex kernel.";
+  let description = [{
+    Builds a target-side `main` wrapper around one lowered `llvm.func` marked
+    with `vortex.kernel_entry`. The wrapper reads the board/XDMA startup
+    descriptor pointer via `vortex_board_xdma_startup_arg`, loads one 64-bit
+    address slot per kernel pointer argument starting after the 8-byte
+    descriptor header, casts those addresses to the lowered kernel argument
+    pointer types, calls the kernel, and exits through
+    `vortex_board_xdma_exit(0)`.
+
+    This first implementation intentionally runs after `convert-func-to-llvm`
+    and supports only bare-pointer lowered kernel arguments.
+  }];
+  let options = [
+    Option<"kernelName", "kernel-name", "std::string",
+           /*default=*/"\"\"",
+           "Exact lowered kernel symbol to wrap; defaults to the unique vortex.kernel_entry">,
+    Option<"entryName", "entry-name", "std::string",
+           /*default=*/"\"main\"",
+           "Generated board entry symbol name">,
+    Option<"xlen", "xlen", "int64_t", "32",
+           "Target pointer-sized integer width for startup_arg, usually 32 or 64">,
+    Option<"argBaseOffset", "arg-base-offset", "int64_t", "8",
+           "Byte offset of kernel argument address slot 0 in the startup descriptor">,
+    Option<"argStride", "arg-stride", "int64_t", "8",
+           "Byte stride between 64-bit kernel argument address slots">,
+    Option<"exitStatus", "exit-status", "int64_t", "0",
+           "Status passed to vortex_board_xdma_exit after the kernel returns">
+  ];
+}
+
 def NormalizeONNXFrontend
     : Pass<"vortex-normalize-onnx-frontend", "::mlir::ModuleOp"> {
   let summary = "Normalize the narrow ONNX-MLIR frontend residue at the pre-Vortex boundary.";

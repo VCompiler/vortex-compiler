@@ -16,6 +16,7 @@ usage() {
     [--allow-unregistered-dialect] \
     [--extra-source wrapper.c] ... \
     [--board-xdma-abi] \
+    [--board-xdma-entry] \
     [--build-runtime] \
     [--xlen 32|64] \
     [--startup-addr 0x80000000] \
@@ -38,7 +39,8 @@ usage() {
        .llvm.mlir / .ll / .s / .o / .elf / .bin / .dump
   4. 若要自己控制 lowering，可传 --pass-pipeline
   5. 若输入已经是 LLVM dialect MLIR，可传 --skip-vx-opt
-  6. 若目标是 local-XDMA board runner，可传 --board-xdma-abi 自动链接标准 entry/exit shim
+  6. 若目标是 local-XDMA board runner，可传 --board-xdma-abi 自动链接标准 runtime shim
+  7. 若要由编译器生成 board/XDMA main wrapper，可传 --board-xdma-entry；它会自动隐含 --board-xdma-abi
 
 环境变量:
   VX_OPT_BIN
@@ -243,6 +245,7 @@ SKIP_VX_OPT=0
 ALLOW_UNREGISTERED=0
 BUILD_RUNTIME=0
 BOARD_XDMA_ABI=0
+BOARD_XDMA_ENTRY=0
 VERBOSE=0
 XLEN=32
 STARTUP_ADDR=0x80000000
@@ -287,6 +290,11 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --board-xdma-abi)
+      BOARD_XDMA_ABI=1
+      shift
+      ;;
+    --board-xdma-entry)
+      BOARD_XDMA_ENTRY=1
       BOARD_XDMA_ABI=1
       shift
       ;;
@@ -586,6 +594,14 @@ else
   fi
   vx_opt_cmd+=(--pass-pipeline="${PASS_PIPELINE}" -o "${LOWERED_MLIR}")
   run_cmd "${vx_opt_cmd[@]}"
+fi
+
+if [[ ${BOARD_XDMA_ENTRY} -eq 1 ]]; then
+  BOARD_ENTRY_PIPELINE="builtin.module(vortex-materialize-board-xdma-entry{xlen=${XLEN}})"
+  BOARD_ENTRY_MLIR="${OUTPUT_DIR}/${BASE_NAME}.board-entry.llvm.mlir"
+  printf '%s\n' "${BOARD_ENTRY_PIPELINE}" >> "${PIPELINE_TXT}"
+  run_cmd "${VX_OPT_BIN}" "${LOWERED_MLIR}" --pass-pipeline="${BOARD_ENTRY_PIPELINE}" -o "${BOARD_ENTRY_MLIR}"
+  run_cmd mv "${BOARD_ENTRY_MLIR}" "${LOWERED_MLIR}"
 fi
 
 sanitize_llvm_dialect_mlir_for_translate "${LOWERED_MLIR}"
