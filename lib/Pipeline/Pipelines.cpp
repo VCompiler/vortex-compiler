@@ -107,6 +107,10 @@ void registerPreVortexPipeline() {
 void buildMVPBackendPipeline(OpPassManager &pm) {
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+  pm.addNestedPass<func::FuncOp>(createMaterializeSIMTControlFlow());
+  pm.addNestedPass<func::FuncOp>(createLowerSIMTControlFlow());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
   pm.addPass(createLegalizeVortexForLLVM());
   pm.addPass(createLowerVortexRuntimeBuiltins());
   pm.addPass(createCanonicalizerPass());

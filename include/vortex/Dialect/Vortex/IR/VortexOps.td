@@ -71,6 +71,82 @@ def Vortex_LocalAllocOp : Vortex_Op<"local_alloc"> {
   let hasVerifier = 1;
 }
 
+
+def Vortex_PredicatedOp : Vortex_Op<"predicated", [SingleBlock]> {
+  let summary = "Execute a region under an explicit lane predicate";
+  let description = [{
+    `vortex.predicated` materializes a short lane-varying single-sided branch
+    as an explicit predicated region. The region must be nested under a
+    `vortex.launch`, must not take block arguments, and is terminated by
+    `vortex.yield`.
+  }];
+
+  let arguments = (ins I1:$pred);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = "$pred $body attr-dict";
+  let hasRegionVerifier = 1;
+}
+
+def Vortex_DivergentIfOp : Vortex_Op<"divergent_if", [SingleBlock]> {
+  let summary = "Execute an explicit divergent SIMT branch";
+  let description = [{
+    `vortex.divergent_if` preserves both sides of a lane-varying branch in a
+    structured Vortex operation. Both regions must be nested under a
+    `vortex.launch`, must not take block arguments, and are terminated by
+    `vortex.yield`.
+  }];
+
+  let arguments = (ins I1:$pred);
+  let regions = (region SizedRegion<1>:$thenRegion,
+                         SizedRegion<1>:$elseRegion);
+  let assemblyFormat = "$pred $thenRegion `else` $elseRegion attr-dict";
+  let hasRegionVerifier = 1;
+}
+
+def Vortex_TMaskOp : Vortex_Op<"tmask"> {
+  let summary = "Read the current active thread mask";
+  let results = (outs Index:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def Vortex_TmcOp : Vortex_Op<"tmc"> {
+  let summary = "Set the current active thread mask";
+  let arguments = (ins Index:$mask);
+  let assemblyFormat = "$mask attr-dict";
+}
+
+def Vortex_PredOp : Vortex_Op<"pred"> {
+  let summary = "Apply a positive predicate against a restore mask";
+  let arguments = (ins I1:$pred, Index:$mask);
+  let assemblyFormat = "$pred `,` $mask attr-dict";
+}
+
+def Vortex_PredNOp : Vortex_Op<"pred_n"> {
+  let summary = "Apply a negative predicate against a restore mask";
+  let arguments = (ins I1:$pred, Index:$mask);
+  let assemblyFormat = "$pred `,` $mask attr-dict";
+}
+
+def Vortex_SplitOp : Vortex_Op<"split"> {
+  let summary = "Split divergent control flow on a positive predicate";
+  let arguments = (ins I1:$pred);
+  let results = (outs Index:$stackPtr);
+  let assemblyFormat = "$pred attr-dict `:` type($stackPtr)";
+}
+
+def Vortex_SplitNOp : Vortex_Op<"split_n"> {
+  let summary = "Split divergent control flow on a negative predicate";
+  let arguments = (ins I1:$pred);
+  let results = (outs Index:$stackPtr);
+  let assemblyFormat = "$pred attr-dict `:` type($stackPtr)";
+}
+
+def Vortex_JoinOp : Vortex_Op<"join"> {
+  let summary = "Join divergent control flow using a split stack pointer";
+  let arguments = (ins Index:$stackPtr);
+  let assemblyFormat = "$stackPtr attr-dict";
+}
+
 def Vortex_BarrierOp : Vortex_Op<"barrier"> {
   let summary = "Synchronize Vortex execution at a given scope";
   let description = [{
@@ -93,8 +169,12 @@ def Vortex_FenceOp : Vortex_Op<"fence"> {
 }
 
 def Vortex_YieldOp : Vortex_Op<"yield", [Pure, Terminator,
-                                          ParentOneOf<["LaunchOp"]>]> {
-  let summary = "Terminate a vortex.launch region";
+                                          ParentOneOf<[
+                                            "LaunchOp",
+                                            "PredicatedOp",
+                                            "DivergentIfOp"
+                                          ]>]> {
+  let summary = "Terminate a structured Vortex region";
   let assemblyFormat = "attr-dict";
 }
 

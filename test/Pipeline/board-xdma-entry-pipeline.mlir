@@ -11,8 +11,10 @@ module {
 
 // CHECK-DAG: llvm.func @vortex_board_xdma_startup_arg() -> i32 attributes {sym_visibility = "private"}
 // CHECK-DAG: llvm.func @vortex_board_xdma_exit(i32) attributes {sym_visibility = "private"}
+// CHECK-DAG: llvm.func @vx_tmc(i32) attributes {sym_visibility = "private"}
 // CHECK-LABEL: llvm.func @store_one(%arg0: !llvm.ptr) attributes {vortex.kernel_entry}
 // CHECK-LABEL: llvm.func @main() -> i32
+// CHECK: llvm.call @vx_tmc
 // CHECK: llvm.call @vortex_board_xdma_startup_arg() : () -> i32
 // CHECK: llvm.getelementptr {{.*}}[8] : (!llvm.ptr) -> !llvm.ptr, i8
 // CHECK: llvm.load {{.*}} {alignment = 8 : i64} : !llvm.ptr -> i64

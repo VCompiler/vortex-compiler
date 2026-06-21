@@ -7,6 +7,8 @@ add_mlir_library(MLIRVortexTransforms
   LowerLinalgInsideVortexKernelPass.cpp
   MapParallelLoopsToVortexLaunchPass.cpp
   MaterializeBoardXDMAEntryPass.cpp
+  MaterializeSIMTControlFlowPass.cpp
+  LowerSIMTControlFlowPass.cpp
   MarkVortexKernelPass.cpp
   MaterializeVortexAddressSpacesPass.cpp
   NormalizeONNXFrontendPass.cpp

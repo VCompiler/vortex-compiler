@@ -9,9 +9,12 @@ module {
 
 // CHECK-DAG: llvm.func @vortex_board_xdma_startup_arg() -> i32 attributes {sym_visibility = "private"}
 // CHECK-DAG: llvm.func @vortex_board_xdma_exit(i32) attributes {sym_visibility = "private"}
+// CHECK-DAG: llvm.func @vx_tmc(i32) attributes {sym_visibility = "private"}
 // CHECK-LABEL: llvm.func @kernel(
 // CHECK-SAME: attributes {vortex.kernel_entry}
 // CHECK-LABEL: llvm.func @main() -> i32 {
+// CHECK: %[[CONTROL_MASK:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: llvm.call @vx_tmc(%[[CONTROL_MASK]]) : (i32) -> ()
 // CHECK: %[[DESC_RAW:.*]] = llvm.call @vortex_board_xdma_startup_arg() : () -> i32
 // CHECK: %[[DESC:.*]] = llvm.inttoptr %[[DESC_RAW]] : i32 to !llvm.ptr
 // CHECK: %[[SLOT0:.*]] = llvm.getelementptr %[[DESC]][8] : (!llvm.ptr) -> !llvm.ptr, i8

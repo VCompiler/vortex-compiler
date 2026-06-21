@@ -2,6 +2,7 @@
 
 #include <VX_config.h>
 #include <vx_intrinsics.h>
+#include <vx_spawn.h>
 
 #ifndef VORTEX_BOARD_XDMA_STARTUP_ARG_CSR
 #define VORTEX_BOARD_XDMA_STARTUP_ARG_CSR 0x340
@@ -32,6 +33,15 @@ void vortex_board_xdma_progress(volatile int *progress, int value) {
     return;
   *progress = value;
   vortex_board_xdma_host_visible_fence();
+}
+
+int vortex_board_xdma_spawn_threads_1d(
+    uint32_t threads, vortex_board_xdma_spawn_callback_t callback, void *arg) {
+  if (threads == 0 || !callback)
+    return 0;
+
+  uint32_t grid_dim = threads;
+  return vx_spawn_threads(1, &grid_dim, 0, (vx_kernel_func_cb)callback, arg);
 }
 
 void vortex_board_xdma_exit_if(int status, int should_write) {

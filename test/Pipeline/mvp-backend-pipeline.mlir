@@ -16,12 +16,21 @@ func.func @kernel(%arg0: memref<16xf32, #vortex.address_space<global>>) attribut
 
 // CHECK-DAG: llvm.func @vx_thread_id() -> i32 attributes {sym_visibility = "private"}
 // CHECK-DAG: llvm.func @vx_num_warps() -> i32 attributes {sym_visibility = "private"}
+// CHECK-DAG: llvm.func @vx_thread_mask() -> i32 attributes {sym_visibility = "private"}
+// CHECK-DAG: llvm.func @vx_tmc(i32) attributes {sym_visibility = "private"}
 // CHECK-DAG: llvm.func @vx_barrier(i32, i32) attributes {sym_visibility = "private"}
-// CHECK-LABEL: llvm.func @kernel(
-// CHECK-SAME: attributes {vortex.kernel_entry}
+// CHECK-LABEL: llvm.func @kernel_vortex_launch_body(
+// CHECK-SAME: attributes {sym_visibility = "private"}
 // CHECK: llvm.call @vx_thread_id() : () -> i32
 // CHECK: llvm.call @vx_num_warps() : () -> i32
 // CHECK: llvm.call @vx_barrier
+// CHECK-LABEL: llvm.func @kernel(
+// CHECK-SAME: attributes {vortex.kernel_entry}
+// CHECK: %[[ENTRY_MASK:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: %[[RESTORE_MASK:.*]] = llvm.call @vx_thread_mask() : () -> i32
+// CHECK: llvm.call @vx_tmc(%[[ENTRY_MASK]]) : (i32) -> ()
+// CHECK: llvm.call @kernel_vortex_launch_body
+// CHECK: llvm.call @vx_tmc(%[[RESTORE_MASK]]) : (i32) -> ()
 // CHECK-NOT: vortex.launch
 // CHECK-NOT: vortex.thread_id
 // CHECK-NOT: vortex.barrier

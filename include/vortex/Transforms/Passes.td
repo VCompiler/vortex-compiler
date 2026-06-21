@@ -57,6 +57,52 @@ def MapParallelLoopsToVortexLaunch
   }];
 }
 
+def MaterializeSIMTControlFlow
+    : Pass<"vortex-materialize-simt-control-flow", "::mlir::func::FuncOp"> {
+  let summary = "Materialize may-varying scf.if operations as explicit Vortex SIMT control flow.";
+  let description = [{
+    Rewrites the first structured SIMT control-flow subset inside
+    `vortex.launch` regions:
+
+      - uniform `scf.if` conditions are left as standard structured control flow
+      - may-varying, result-free, short single-sided branches become
+        `vortex.predicated`
+      - may-varying, result-free branches with else or larger straight-line
+        bodies become `vortex.divergent_if`
+      - unsafe may-varying branches with results, barriers, calls, returns, or
+        nested complex control flow are rejected instead of silently lowered
+
+    The first implementation uses a conservative may-varying analysis: only
+    constants, function arguments, `vortex.core_id`, `vortex.subgroup_id`, and
+    arith operations whose operands are all proven uniform are Uniform. All
+    other values, including `vortex.thread_id`, `memref.load`, `func.call`, and
+    unknown operation results, are treated as MayVarying and are materialized
+    when the branch body is supported.
+  }];
+}
+
+def LowerSIMTControlFlow
+    : Pass<"vortex-lower-simt-control-flow", "::mlir::func::FuncOp"> {
+  let summary = "Lower structured Vortex SIMT control flow to explicit mask operations.";
+  let description = [{
+    Lowers structured Vortex SIMT control-flow operations inside `vortex.launch`
+    regions to the first low-level mask-control dialect subset:
+
+      - launch entry saves the incoming `vortex.tmask`, converts the launch
+        thread count to an active-lane bitmask, then applies it with
+        `vortex.tmc`
+      - launch exit restores the saved active mask with `vortex.tmc`
+      - `vortex.predicated` becomes `vortex.split`, a standard single-sided
+        `scf.if`, then `vortex.join`
+      - `vortex.divergent_if` becomes `vortex.split`, a standard `scf.if`
+        containing the original then/else bodies, then `vortex.join`
+
+    This pass removes the structured Vortex SIMT regions but intentionally keeps
+    low-level `vortex.tmc/pred/pred_n/split/split_n/join` operations as
+    target-specific IR for a later runtime/custom-instruction lowering step.
+  }];
+}
+
 def PromoteTilesToVortexLocal
     : Pass<"vortex-promote-tiles-to-local", "::mlir::func::FuncOp"> {
   let summary = "Promote explicitly marked memref.subview tiles into vortex.local_alloc buffers.";
@@ -224,8 +270,10 @@ def LegalizeVortexForLLVM
     The initial implementation intentionally keeps the scope narrow:
 
       - run standard `lower-affine` on all `func.func`
-      - inline `vortex.launch` bodies inside functions marked with
-        `vortex.kernel`
+      - outline the executable payload of lowered `vortex.launch` bodies into
+        private `vortex.launch_helper` functions when the launch contains an
+        explicit mask prologue/epilogue, then inline the remaining mask wrapper
+        inside functions marked with `vortex.kernel`
       - rewrite `#vortex.address_space<global/private>` into numeric memory
         spaces that the standard LLVM type converter can accept
       - reject residual `vortex.local_alloc` or any remaining
@@ -253,6 +301,11 @@ def LowerVortexRuntimeBuiltins
       - `vortex.core_id      -> call @vx_core_id()`
       - `vortex.subgroup_id  -> call @vx_warp_id()`
       - `vortex.thread_id    -> call @vx_thread_id()`
+      - `vortex.tmask        -> call @vx_thread_mask()`
+      - `vortex.tmc          -> call @vx_tmc(mask)`
+      - `vortex.pred/pred_n  -> call @vx_pred/vx_pred_n(pred, mask)`
+      - `vortex.split/split_n -> call @vx_split/vx_split_n(pred)`
+      - `vortex.join         -> call @vx_join(stack_ptr)`
       - `vortex.barrier<core> -> call @vx_barrier(0, vx_num_warps())`
 
     The integer wrapper results are cast back to `index` so the surrounding IR
@@ -267,6 +320,8 @@ def LowerVortexRuntimeBuiltins
     This pass currently rejects:
 
       - residual `vortex.launch` / `vortex.yield` (run `vortex-legalize-for-llvm` first)
+      - residual structured SIMT ops `vortex.predicated` / `vortex.divergent_if`
+        (run `vortex-lower-simt-control-flow` first)
       - `vortex.local_alloc`
       - `vortex.fence`
       - `vortex.barrier<subgroup>`
@@ -281,15 +336,25 @@ def MaterializeBoardXDMAEntry
   let summary = "Generate a board/XDMA main entry wrapper for a lowered Vortex kernel.";
   let description = [{
     Builds a target-side `main` wrapper around one lowered `llvm.func` marked
-    with `vortex.kernel_entry`. The wrapper reads the board/XDMA startup
+    with `vortex.kernel_entry`. The wrapper first establishes the standard
+    control-lane state with `vx_tmc(1)`, then reads the board/XDMA startup
     descriptor pointer via `vortex_board_xdma_startup_arg`, loads one 64-bit
     address slot per kernel pointer argument starting after the 8-byte
     descriptor header, casts those addresses to the lowered kernel argument
     pointer types, calls the kernel, and exits through
     `vortex_board_xdma_exit(0)`.
 
+    If the lowered kernel is the conservative outlined-launch wrapper emitted by
+    `vortex-legalize-for-llvm`, the board entry instead generates a callback
+    adapter and calls `vortex_board_xdma_spawn_threads_1d(thread_count,
+    adapter, descriptor)`, which delegates lane execution to the native Vortex
+    `vx_spawn_threads` runtime ABI.
+
     This first implementation intentionally runs after `convert-func-to-llvm`
-    and supports only bare-pointer lowered kernel arguments.
+    and supports only bare-pointer lowered kernel arguments. Spawn lowering is
+    enabled only for a single outlined launch with a constant low-contiguous
+    active-lane mask and pointer-only helper arguments; other kernels keep the
+    direct-call entry path.
   }];
   let options = [
     Option<"kernelName", "kernel-name", "std::string",
